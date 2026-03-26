@@ -8,14 +8,14 @@ Also works as a standalone multi-panel terminal file manager with AI-powered nat
 
 ## Features
 
-- **Blazing Fast**: Written in Rust for maximum performance. ~10ms startup, ~5MB memory usage, ~4MB static binary with zero runtime dependencies.
-- **AI-Powered Commands**: Natural language file operations powered by Claude, Codex, Gemini & OpenCode. Press `.` and describe what you want.
+- **Blazing Fast**: Written in Rust for maximum performance. Single binary (15-20MB depending on platform), optimized with LTO and strip.
+- **AI-Powered Commands**: Natural language coding and file management powered by Claude, Codex, Gemini & OpenCode. Press `.` and describe what you want.
 - **Multi-Panel Navigation**: Dynamic multi-panel interface for efficient file management
 - **Keyboard Driven**: Full keyboard navigation designed for power users
 - **Built-in Editor**: Edit files with syntax highlighting for 20+ languages
 - **Image Viewer**: View images directly in terminal (Kitty, iTerm2, Sixel protocols) with zoom and pan
 - **Process Manager**: Monitor and manage system processes with sortable columns
-- **File Search**: Find files by name pattern and content with recursive search
+- **File Search**: Find files by name pattern with recursive search
 - **Diff Compare**: Side-by-side folder and file comparison
 - **Git Integration**: Built-in git status, commit, log, branch management and inter-commit diff
 - **Remote SSH/SFTP**: Browse remote servers via SSH/SFTP with saved profiles
@@ -37,7 +37,7 @@ Supports 4 AI providers: **Claude Code**, **Codex CLI**, **Gemini CLI**, and **O
 Run your AI coding sessions remotely via Telegram:
 
 ```bash
-cokacdir --bot <TELEGRAM_BOT_TOKEN>
+cokacdir --ccserver <TELEGRAM_BOT_TOKEN> [TOKEN2] ...
 ```
 
 **Capabilities:**
@@ -48,7 +48,7 @@ cokacdir --bot <TELEGRAM_BOT_TOKEN>
 - Bot-to-bot messaging for multi-agent workflows
 - File upload/download, tool management, and debug logging
 
-**Commands:** `/start`, `/session`, `/model`, `/stop`, `/clear`, `/help`, `/down`, `/allowed`, `/instruction`, `/debug`, `/silent`, and more.
+**Commands:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
 
 ## Supported Platforms
 

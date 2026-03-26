@@ -96,7 +96,7 @@ Animated hero section featuring:
 ### Features
 
 Six feature cards showcasing:
-- **Blazing Fast** - Rust performance (10ms startup, 5MB memory)
+- **Blazing Fast** - Rust performance, single optimized binary (~15MB)
 - **AI-Powered Commands** - Natural language file operations via Claude
 - **Multi Panel** - Dynamic multi-panel layout
 - **Keyboard Driven** - Full keyboard navigation

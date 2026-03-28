@@ -5094,8 +5094,10 @@ async fn handle_context_command(
     let key = chat_id.0.to_string();
 
     if arg.is_empty() {
-        let data = state.lock().await;
-        let current = data.settings.context.get(&key).copied().unwrap_or(12);
+        let current = {
+            let data = state.lock().await;
+            data.settings.context.get(&key).copied().unwrap_or(12)
+        };
         shared_rate_limit_wait(state, chat_id).await;
         tg!("send_message", bot.send_message(chat_id, format!(
             "Group chat log context: <b>{}</b> entries\n\n\

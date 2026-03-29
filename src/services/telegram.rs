@@ -193,30 +193,43 @@ pub fn serialize_payload(entries: &[RawPayloadEntry]) -> String {
 }
 
 
-/// RAII guard for group chat exclusive lock.
-/// Ensures only one bot processes at a time within the same group chat.
+/// RAII guard for per-chat exclusive lock.
+/// Ensures only one AI request processes at a time within the same chat.
 /// Lock is automatically released when the guard is dropped.
 struct GroupChatLock {
     _file: std::fs::File,
 }
 
-/// Acquire exclusive file lock for a group chat (async, non-blocking).
-/// Returns None for private chats (chat_id >= 0) or if lock file cannot be created.
-/// For group chats, polls with sleep until the lock is acquired.
+/// Acquire exclusive file lock for a chat (async, non-blocking).
+/// Returns None if lock file cannot be created.
+/// Polls with sleep until the lock is acquired.
 async fn acquire_group_chat_lock(chat_id: i64) -> Option<GroupChatLock> {
     use fs2::FileExt;
-    if chat_id >= 0 { return None; }
-    let dir = dirs::home_dir()?.join(".cokacdir").join("group_chat");
+    let dir = dirs::home_dir()?.join(".cokacdir").join("chat_locks");
     let _ = std::fs::create_dir_all(&dir);
     let lock_path = dir.join(format!("{}.lock", chat_id));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&lock_path).ok()?;
+    let mut waited = false;
     loop {
         match file.try_lock_exclusive() {
-            Ok(_) => return Some(GroupChatLock { _file: file }),
-            Err(_) => tokio::time::sleep(tokio::time::Duration::from_millis(200)).await,
+            Ok(_) => {
+                if waited {
+                    msg_debug(&format!("[chat_lock] chat_id={} lock acquired after waiting", chat_id));
+                } else {
+                    msg_debug(&format!("[chat_lock] chat_id={} lock acquired immediately", chat_id));
+                }
+                return Some(GroupChatLock { _file: file });
+            }
+            Err(_) => {
+                if !waited {
+                    msg_debug(&format!("[chat_lock] chat_id={} lock contended, waiting...", chat_id));
+                    waited = true;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            }
         }
     }
 }
@@ -423,6 +436,8 @@ struct BotSettings {
     context: HashMap<String, usize>,
     /// chat_id (string) → system instruction for AI
     instructions: HashMap<String, String>,
+    /// chat_id (string) → true if queue mode enabled (queue messages while AI is busy)
+    queue: HashMap<String, bool>,
     /// Bot's Telegram username (stored at startup via get_me)
     username: String,
     /// Bot's display name (first_name from Telegram API, stored at startup via get_me)
@@ -442,6 +457,7 @@ impl Default for BotSettings {
             direct: HashMap::new(),
             context: HashMap::new(),
             instructions: HashMap::new(),
+            queue: HashMap::new(),
             username: String::new(),
             display_name: String::new(),
         }
@@ -472,7 +488,7 @@ fn get_model(settings: &BotSettings, chat_id: ChatId) -> Option<String> {
 
 /// Check if silent mode is enabled for a chat (default: ON)
 fn is_silent(settings: &BotSettings, chat_id: ChatId) -> bool {
-    settings.silent.get(&chat_id.0.to_string()).copied().unwrap_or(true)
+    settings.silent.get(&chat_id.0.to_string()).copied().unwrap_or(SILENT_MODE_DEFAULT)
 }
 
 /// Schedule entry persisted as JSON in ~/.cokacdir/schedule/
@@ -1484,6 +1500,28 @@ fn version_is_newer(a: &str, b: &str) -> bool {
     va > vb
 }
 
+/// A message queued while AI is busy (queue mode ON)
+struct QueuedMessage {
+    /// Short hex ID for user-facing reference (e.g. "A394FDA")
+    id: String,
+    text: String,
+    user_display_name: String,
+    /// File/location upload records captured at queue time so the correct message gets them
+    pending_uploads: Vec<String>,
+}
+
+/// Generate a short uppercase hex ID (7 chars) for a queued message
+fn generate_queue_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Mix in a simple hash to reduce collisions within the same millisecond
+    let hash = nanos.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    format!("{:07X}", (hash >> 32) as u32 & 0x0FFF_FFFF)
+}
+
 /// Shared state: per-chat sessions + bot settings
 struct SharedData {
     sessions: HashMap<ChatId, ChatSession>,
@@ -1498,6 +1536,8 @@ struct SharedData {
     polling_time_ms: u64,
     /// Schedule IDs currently being executed or pending, per chat
     pending_schedules: HashMap<ChatId, std::collections::HashSet<String>>,
+    /// Per-chat message queue for queue mode (messages waiting to be processed)
+    message_queues: HashMap<ChatId, std::collections::VecDeque<QueuedMessage>>,
     /// Bot's Telegram username (for bot-to-bot messaging)
     bot_username: String,
     /// Bot's display name (first_name from Telegram API)
@@ -1588,6 +1628,18 @@ async fn auto_restore_session(state: &SharedState, chat_id: ChatId, user_name: &
 
 /// Telegram message length limit
 const TELEGRAM_MSG_LIMIT: usize = 4096;
+/// Maximum number of messages that can be queued per chat in queue mode
+const MAX_QUEUE_SIZE: usize = 20;
+/// Default queue mode state for chats without explicit setting
+const QUEUE_MODE_DEFAULT: bool = true;
+/// Default silent mode state for chats without explicit setting
+const SILENT_MODE_DEFAULT: bool = true;
+/// Default direct mode state for chats without explicit setting
+const DIRECT_MODE_DEFAULT: bool = false;
+/// Default public access state for group chats without explicit setting
+const PUBLIC_MODE_DEFAULT: bool = false;
+/// Default debug mode state (global, not per-chat)
+const DEBUG_MODE_DEFAULT: bool = false;
 
 /// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
 pub fn token_hash(token: &str) -> String {
@@ -1677,7 +1729,7 @@ fn load_bot_settings(token: &str) -> BotSettings {
         })
         .unwrap_or_default();
 
-    let debug = entry.get("debug").and_then(|v| v.as_bool()).unwrap_or(false);
+    let debug = entry.get("debug").and_then(|v| v.as_bool()).unwrap_or(DEBUG_MODE_DEFAULT);
 
     let silent: HashMap<String, bool> = entry.get("silent")
         .and_then(|v| v.as_object())
@@ -1707,6 +1759,13 @@ fn load_bot_settings(token: &str) -> BotSettings {
             .collect())
         .unwrap_or_default();
 
+    let queue: HashMap<String, bool> = entry.get("queue")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter()
+            .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+            .collect())
+        .unwrap_or_default();
+
     let username = entry.get("username")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -1717,7 +1776,7 @@ fn load_bot_settings(token: &str) -> BotSettings {
         .unwrap_or("")
         .to_string();
 
-    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, username, display_name }
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, queue, username, display_name }
 }
 
 /// Save bot settings to bot_settings.json
@@ -1755,6 +1814,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "direct": settings.direct,
         "context": settings.context,
         "instructions": settings.instructions,
+        "queue": settings.queue,
         "username": settings.username,
         "display_name": settings.display_name,
     });
@@ -1975,6 +2035,8 @@ pub async fn run_bot(token: &str) {
         teloxide::types::BotCommand::new("session", "Show current session ID"),
         teloxide::types::BotCommand::new("clear", "Clear AI conversation history"),
         teloxide::types::BotCommand::new("stop", "Stop current AI request"),
+        teloxide::types::BotCommand::new("stopall", "Stop request and clear queue"),
+        teloxide::types::BotCommand::new("queue", "Toggle queue mode"),
         teloxide::types::BotCommand::new("down", "Download file from server"),
         teloxide::types::BotCommand::new("public", "Toggle public access (group only)"),
         teloxide::types::BotCommand::new("availabletools", "List all available tools"),
@@ -2010,6 +2072,7 @@ pub async fn run_bot(token: &str) {
         api_timestamps: HashMap::new(),
         polling_time_ms,
         pending_schedules: HashMap::new(),
+        message_queues: HashMap::new(),
         bot_username: bot_username.clone(),
         bot_display_name: bot_display_name.clone(),
     }));
@@ -2175,7 +2238,7 @@ async fn handle_message(
     let (require_prefix, imprinted, is_owner) = {
         let mut data = state.lock().await;
         let chat_key = chat_id.0.to_string();
-        let direct_setting = data.settings.direct.get(&chat_key).copied().unwrap_or(false);
+        let direct_setting = data.settings.direct.get(&chat_key).copied().unwrap_or(DIRECT_MODE_DEFAULT);
         let is_direct = is_group_chat && direct_setting;
         msg_debug(&format!("[handle_message] chat_id={}, uid={}, is_group_chat={}, direct_setting={}, is_direct={}",
             chat_id.0, uid, is_group_chat, direct_setting, is_direct));
@@ -2195,7 +2258,7 @@ async fn handle_message(
                 if uid != owner_id {
                     // Check if this is a public group chat
                     let is_public = is_group_chat
-                        && data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(false);
+                        && data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(PUBLIC_MODE_DEFAULT);
                     msg_debug(&format!("[handle_message] non-owner uid={}, owner_id={}, is_public={}", uid, owner_id, is_public));
                     if !is_public {
                         // Unregistered user → reject silently (log only)
@@ -2293,14 +2356,56 @@ async fn handle_message(
             if let Some(text) = text_part {
                 if !text.is_empty() {
                     // Block if an AI request is already in progress
-                    let ai_busy = {
-                        let data = state.lock().await;
-                        data.cancel_tokens.contains_key(&chat_id)
+                    // Atomically: check busy + queue mode + push to queue (prevents race with /stopall)
+                    let (ai_busy, queue_enabled, queue_result) = {
+                        let mut data = state.lock().await;
+                        let busy = data.cancel_tokens.contains_key(&chat_id);
+                        let qkey = chat_id.0.to_string();
+                        let qmode = data.settings.queue.get(&qkey).copied().unwrap_or(QUEUE_MODE_DEFAULT);
+                        msg_debug(&format!("[queue:media] chat_id={}, busy={}, queue_mode={}", chat_id.0, busy, qmode));
+                        let qr = if busy && qmode {
+                            let cur_len = data.message_queues.get(&chat_id).map_or(0, |q| q.len());
+                            let queue_full = cur_len >= MAX_QUEUE_SIZE;
+                            if queue_full {
+                                msg_debug(&format!("[queue:media] chat_id={}, queue FULL ({}/{})", chat_id.0, cur_len, MAX_QUEUE_SIZE));
+                                None // queue full
+                            } else {
+                                // Capture pending_uploads so they stay associated with this caption
+                                let uploads = data.sessions.get_mut(&chat_id)
+                                    .map(|s| std::mem::take(&mut s.pending_uploads))
+                                    .unwrap_or_default();
+                                let qid = generate_queue_id();
+                                let q = data.message_queues.entry(chat_id).or_insert_with(std::collections::VecDeque::new);
+                                q.push_back(QueuedMessage {
+                                    id: qid.clone(),
+                                    text: text.to_string(),
+                                    user_display_name: user_name.clone(),
+                                    pending_uploads: uploads.clone(),
+                                });
+                                msg_debug(&format!("[queue:media] chat_id={}, QUEUED id={}, pos={}, text={:?}, uploads={}", chat_id.0, qid, q.len(), truncate_str(text, 60), uploads.len()));
+                                Some((qid, text.to_string()))
+                            }
+                        } else {
+                            None
+                        };
+                        (busy, qmode, qr)
                     };
                     if ai_busy {
-                        shared_rate_limit_wait(&state, chat_id).await;
-                        tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
-                            .await)?;
+                        if queue_enabled {
+                            shared_rate_limit_wait(&state, chat_id).await;
+                            if let Some((qid, qtxt)) = queue_result {
+                                let preview = truncate_str(&qtxt, 30);
+                                tg!("send_message", bot.send_message(chat_id, &format!("Queued ({qid}) \"{preview}\"\n- /stopall to cancel all\n- /stop {qid} to cancel this"))
+                                    .await)?;
+                            } else {
+                                tg!("send_message", bot.send_message(chat_id, &format!("Queue full (max {}). Use /stopall to clear.", MAX_QUEUE_SIZE))
+                                    .await)?;
+                            }
+                        } else {
+                            shared_rate_limit_wait(&state, chat_id).await;
+                            tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
+                                .await)?;
+                        }
                     } else {
                         handle_text_message(&bot, chat_id, text, &state, &user_name).await?;
                     }
@@ -2495,22 +2600,132 @@ async fn handle_message(
         return Ok(());
     }
 
-    // Block all messages except /stop while an AI request is in progress
-    if !text.starts_with("/stop") {
-        let data = state.lock().await;
-        if data.cancel_tokens.contains_key(&chat_id) {
-            drop(data);
-            shared_rate_limit_wait(&state, chat_id).await;
-            tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
-                .await)?;
+    // Block all messages except /stop, /stopall, /queue while an AI request is in progress
+    if !text.starts_with("/stop") && !text.starts_with("/queue") {
+        // Determine the actual user text to queue (strip command prefix, pure string ops)
+        let queue_text = if text.starts_with("/query") {
+            // /query command → queue the body
+            text.strip_prefix("/query")
+                .and_then(|s| {
+                    // Handle /query@botname format
+                    if s.starts_with('@') {
+                        s.find(' ').map(|i| s[i..].trim_start())
+                    } else {
+                        Some(s.trim_start())
+                    }
+                })
+                .filter(|s| !s.is_empty())
+        } else if text.starts_with(';') {
+            // ; prefix → queue stripped text
+            let stripped = text[1..].trim_start();
+            if stripped.is_empty() { None } else { Some(stripped) }
+        } else if text.starts_with('!') || text.starts_with('/') {
+            // Shell commands and other / commands are NOT queueable
+            None
+        } else {
+            // Plain text
+            Some(text.as_str())
+        };
+        msg_debug(&format!("[queue:text] chat_id={}, text={:?}, queue_text={:?}", chat_id.0, truncate_str(&text, 60), queue_text.map(|s| truncate_str(s, 60))));
+
+        // Atomically: check busy + queue mode + push to queue (prevents race with /stopall)
+        // Returns: Option<(can_queue, queue_on, queue_result)>
+        //   queue_result: Some((id, text)) if queued, None if full/non-queueable
+        let busy_info: Option<(bool, bool, Option<(String, String)>)> = {
+            let mut data = state.lock().await;
+            if data.cancel_tokens.contains_key(&chat_id) {
+                let qkey = chat_id.0.to_string();
+                let queue_enabled = data.settings.queue.get(&qkey).copied().unwrap_or(QUEUE_MODE_DEFAULT);
+                msg_debug(&format!("[queue:text] chat_id={}, AI busy, queue_mode={}, queueable={}", chat_id.0, queue_enabled, queue_text.is_some()));
+                let qr = if queue_enabled {
+                    if let Some(qt) = queue_text {
+                        let cur_len = data.message_queues.get(&chat_id).map_or(0, |q| q.len());
+                        let queue_full = cur_len >= MAX_QUEUE_SIZE;
+                        if queue_full {
+                            msg_debug(&format!("[queue:text] chat_id={}, queue FULL ({}/{})", chat_id.0, cur_len, MAX_QUEUE_SIZE));
+                            None // queue full
+                        } else {
+                            // Capture pending_uploads so they stay associated with this message
+                            let uploads = data.sessions.get_mut(&chat_id)
+                                .map(|s| std::mem::take(&mut s.pending_uploads))
+                                .unwrap_or_default();
+                            let qid = generate_queue_id();
+                            let q = data.message_queues.entry(chat_id).or_insert_with(std::collections::VecDeque::new);
+                            q.push_back(QueuedMessage {
+                                id: qid.clone(),
+                                text: qt.to_string(),
+                                user_display_name: user_name.clone(),
+                                pending_uploads: uploads.clone(),
+                            });
+                            msg_debug(&format!("[queue:text] chat_id={}, QUEUED id={}, pos={}, text={:?}, uploads={}", chat_id.0, qid, q.len(), truncate_str(qt, 60), uploads.len()));
+                            Some((qid, qt.to_string()))
+                        }
+                    } else {
+                        msg_debug(&format!("[queue:text] chat_id={}, non-queueable command, rejecting", chat_id.0));
+                        None // non-queueable
+                    }
+                } else {
+                    None
+                };
+                Some((queue_enabled && queue_text.is_some(), queue_enabled, qr))
+            } else {
+                msg_debug(&format!("[queue:text] chat_id={}, AI not busy, proceeding normally", chat_id.0));
+                None // not busy
+            }
+        };
+
+        if let Some((can_queue, queue_on, queue_result)) = busy_info {
+            if can_queue {
+                shared_rate_limit_wait(&state, chat_id).await;
+                if let Some((qid, qtxt)) = queue_result {
+                    let preview = truncate_str(&qtxt, 30);
+                    tg!("send_message", bot.send_message(chat_id, &format!("Queued ({qid}) \"{preview}\"\n- /stopall to cancel all\n- /stop {qid} to cancel this"))
+                        .await)?;
+                } else {
+                    tg!("send_message", bot.send_message(chat_id, &format!("Queue full (max {}). Use /stopall to clear.", MAX_QUEUE_SIZE))
+                        .await)?;
+                }
+            } else {
+                shared_rate_limit_wait(&state, chat_id).await;
+                if queue_on {
+                    tg!("send_message", bot.send_message(chat_id, "AI request in progress. This command cannot be queued. Use /stop to cancel current, /stopall to cancel all.")
+                        .await)?;
+                } else {
+                    tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
+                        .await)?;
+                }
+            }
             return Ok(());
         }
     }
 
-    if text.starts_with("/stop") {
-        msg_debug(&format!("[handle_message] routing → /stop"));
-        println!("  [{timestamp}] ◀ [{user_name}] /stop");
-        handle_stop_command(&bot, chat_id, &state).await?;
+    if text.starts_with("/stopall") {
+        msg_debug(&format!("[handle_message] routing → /stopall"));
+        println!("  [{timestamp}] ◀ [{user_name}] /stopall");
+        handle_stopall_command(&bot, chat_id, &state).await?;
+    } else if text.starts_with("/stop") {
+        // Check if /stop has a valid queue ID argument (exactly 7 hex chars, e.g. "/stop A394FDA")
+        let stop_queue_id = text.strip_prefix("/stop")
+            .and_then(|s| {
+                // Handle /stop@botname format
+                let s = if s.starts_with('@') { s.find(' ').map(|i| &s[i..]).unwrap_or("") } else { s };
+                let trimmed = s.trim();
+                // Only treat as queue ID if it matches the exact format: 7 hex characters
+                if trimmed.len() == 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Some(trimmed.to_string())
+                } else {
+                    None
+                }
+            });
+        if let Some(queue_id) = stop_queue_id {
+            msg_debug(&format!("[handle_message] routing → /stop queue_id={}", queue_id));
+            println!("  [{timestamp}] ◀ [{user_name}] /stop {queue_id}");
+            handle_stop_queue_item(&bot, chat_id, &state, &queue_id).await?;
+        } else {
+            msg_debug(&format!("[handle_message] routing → /stop"));
+            println!("  [{timestamp}] ◀ [{user_name}] /stop");
+            handle_stop_command(&bot, chat_id, &state).await?;
+        }
     } else if text.starts_with("/help") {
         msg_debug(&format!("[handle_message] routing → /help"));
         println!("  [{timestamp}] ◀ [{user_name}] /help");
@@ -2574,6 +2789,10 @@ async fn handle_message(
         msg_debug("[handle_message] routing → /silent");
         println!("  [{timestamp}] ◀ [{user_name}] /silent");
         handle_silent_command(&bot, chat_id, &state, token).await?;
+    } else if text.starts_with("/queue") {
+        msg_debug("[handle_message] routing → /queue");
+        println!("  [{timestamp}] ◀ [{user_name}] /queue");
+        handle_queue_command(&bot, chat_id, &state, token).await?;
     } else if text.starts_with("/direct") {
         msg_debug("[handle_message] routing → /direct");
         println!("  [{timestamp}] ◀ [{user_name}] /direct");
@@ -2656,6 +2875,9 @@ Manage server files &amp; chat with Claude AI.
 <code>/session</code> — Show current session ID
 <code>/clear</code> — Clear AI conversation history
 <code>/stop</code> — Stop current AI request
+<code>/stop &lt;ID&gt;</code> — Cancel a specific queued message
+<code>/stopall</code> — Stop request and clear queue
+<code>/queue</code> — Toggle queue mode (queue messages while AI is busy)
 
 <b>File Transfer</b>
 <code>/down &lt;file&gt;</code> — Download file from server
@@ -4307,6 +4529,155 @@ async fn handle_stop_command(
     Ok(())
 }
 
+/// Handle /stop <queue_id> - remove a specific queued message by its ID
+async fn handle_stop_queue_item(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+    queue_id: &str,
+) -> ResponseResult<()> {
+    let removed = {
+        let mut data = state.lock().await;
+        if let Some(q) = data.message_queues.get_mut(&chat_id) {
+            if let Some(pos) = q.iter().position(|m| m.id.eq_ignore_ascii_case(queue_id)) {
+                let removed_msg = q.remove(pos);
+                msg_debug(&format!("[queue:stop_item] chat_id={}, removed id={}, text={:?}, remaining={}", chat_id.0, queue_id, removed_msg.as_ref().map(|m| truncate_str(&m.text, 60)), q.len()));
+                // Clean up empty queue
+                if q.is_empty() {
+                    data.message_queues.remove(&chat_id);
+                }
+                removed_msg.map(|m| m.id)
+            } else {
+                msg_debug(&format!("[queue:stop_item] chat_id={}, id={} not found in queue", chat_id.0, queue_id));
+                None
+            }
+        } else {
+            msg_debug(&format!("[queue:stop_item] chat_id={}, no queue exists", chat_id.0));
+            None
+        }
+    };
+
+    shared_rate_limit_wait(state, chat_id).await;
+    if let Some(id) = removed {
+        tg!("send_message", bot.send_message(chat_id, &format!("Removed queued message ({id}).")).await)?;
+    } else {
+        tg!("send_message", bot.send_message(chat_id, &format!("Queue ID \"{queue_id}\" not found.")).await)?;
+    }
+    Ok(())
+}
+
+/// Handle /stopall command - cancel in-progress AI request AND clear the message queue
+async fn handle_stopall_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    // Clear the message queue, get cancel token, and set cancelled flag atomically
+    // to prevent a new message from being queued between queue clear and cancellation
+    let (queue_len, token, already_cancelled) = {
+        let mut data = state.lock().await;
+        let q = data.message_queues.remove(&chat_id);
+        let qlen = q.map(|q| q.len()).unwrap_or(0);
+        let ct = data.cancel_tokens.get(&chat_id).cloned();
+        let was_cancelled = if let Some(ref t) = ct {
+            let prev = t.cancelled.load(Ordering::Relaxed);
+            t.cancelled.store(true, Ordering::Relaxed);
+            prev
+        } else {
+            false
+        };
+        (qlen, ct, was_cancelled)
+    };
+    msg_debug(&format!("[queue:stopall] chat_id={}, has_token={}, queue_cleared={}, already_cancelled={}", chat_id.0, token.is_some(), queue_len, already_cancelled));
+
+    match token {
+        Some(token) => {
+            // Ignore duplicate stop if already cancelled
+            if already_cancelled {
+                msg_debug(&format!("[queue:stopall] chat_id={}, duplicate cancel ignored, queue_cleared={}", chat_id.0, queue_len));
+                // Still report queue clearance if there were queued messages
+                if queue_len > 0 {
+                    shared_rate_limit_wait(state, chat_id).await;
+                    tg!("send_message", bot.send_message(chat_id, &format!("{} queued message(s) cleared.", queue_len)).await)?;
+                }
+                return Ok(());
+            }
+
+            // Cancellation flag already set above inside the lock
+
+            // Kill child process
+            if let Ok(guard) = token.child_pid.lock() {
+                if let Some(pid) = *guard {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                    #[cfg(windows)]
+                    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output(); }
+                }
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ■ Cancel signal sent (stopall, {} queued cleared)", queue_len);
+
+            // Send feedback
+            let msg_text = if queue_len > 0 {
+                format!("Stopping... ({} queued message(s) cleared)", queue_len)
+            } else {
+                "Stopping...".to_string()
+            };
+            shared_rate_limit_wait(state, chat_id).await;
+            let stop_msg = tg!("send_message", bot.send_message(chat_id, &msg_text).await)?;
+
+            // Store the stop message ID (same logic as /stop)
+            {
+                let mut data = state.lock().await;
+                if data.cancel_tokens.contains_key(&chat_id) {
+                    data.stop_message_ids.insert(chat_id, stop_msg.id);
+                } else {
+                    drop(data);
+                    shared_rate_limit_wait(state, chat_id).await;
+                    let _ = tg!("delete_message", bot.delete_message(chat_id, stop_msg.id).await);
+                    return Ok(());
+                }
+            }
+        }
+        None => {
+            let msg_text = if queue_len > 0 {
+                format!("No active request. {} queued message(s) cleared.", queue_len)
+            } else {
+                "No active request to stop.".to_string()
+            };
+            shared_rate_limit_wait(state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, &msg_text).await)?;
+        }
+    }
+
+    // Clear all pending bot messages for this chat (same as /stop)
+    if let Some(msg_dir) = messages_dir() {
+        if let Ok(entries) = std::fs::read_dir(&msg_dir) {
+            let chat_id_str = chat_id.0.to_string();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if v.get("chat_id").and_then(|c| c.as_str()) == Some(&chat_id_str) {
+                            let id = v.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+                            msg_debug(&format!("[handle_stopall] clearing pending bot message: {}", id));
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle /down <filepath> - send file to user
 async fn handle_down_command(
     bot: &Bot,
@@ -4512,7 +4883,10 @@ async fn handle_shell_command(
 
     // Check if cancelled during lock wait
     if cancel_token.cancelled.load(Ordering::Relaxed) {
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=query_cancelled_during_lock", chat_id.0));
         { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+        drop(group_lock); // release before queue processing to avoid deadlock
+        process_next_queued_message(bot, chat_id, state).await;
         return Ok(());
     }
 
@@ -4536,7 +4910,10 @@ async fn handle_shell_command(
     {
         Ok(m) => m,
         Err(e) => {
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=query_placeholder_error", chat_id.0));
             { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+            drop(group_lock); // release before queue processing to avoid deadlock
+            process_next_queued_message(bot, chat_id, state).await;
             return Err(e);
         }
     };
@@ -4877,6 +5254,10 @@ async fn handle_shell_command(
             let mut data = state_owned.lock().await;
             data.cancel_tokens.remove(&chat_id);
             data.stop_message_ids.remove(&chat_id);
+            drop(data);
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=query_poll_cancelled", chat_id.0));
+            drop(_group_lock); // release group chat lock before processing queue
+            process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
             return;
         }
 
@@ -4895,6 +5276,9 @@ async fn handle_shell_command(
             let mut data = state_owned.lock().await;
             data.cancel_tokens.remove(&chat_id);
         }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=query_poll_completed", chat_id.0));
+        drop(_group_lock); // release group chat lock before processing queue
+        process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
     });
 
     Ok(())
@@ -5061,7 +5445,7 @@ async fn handle_direct_command(
     let next = {
         let mut data = state.lock().await;
         let key = chat_id.0.to_string();
-        let prev = data.settings.direct.get(&key).copied().unwrap_or(false);
+        let prev = data.settings.direct.get(&key).copied().unwrap_or(DIRECT_MODE_DEFAULT);
         let next = !prev;
         msg_debug(&format!("[handle_direct] chat_id={}, {} → {}", chat_id.0, prev, next));
         data.settings.direct.insert(key, next);
@@ -5209,7 +5593,7 @@ async fn handle_silent_command(
     let next = {
         let mut data = state.lock().await;
         let key = chat_id.0.to_string();
-        let prev = data.settings.silent.get(&key).copied().unwrap_or(true);
+        let prev = data.settings.silent.get(&key).copied().unwrap_or(SILENT_MODE_DEFAULT);
         let next = !prev;
         data.settings.silent.insert(key, next);
         save_bot_settings(token, &data.settings);
@@ -5218,6 +5602,46 @@ async fn handle_silent_command(
     let status = if next { "🔇 Silent mode: ON" } else { "🔊 Silent mode: OFF" };
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, status).await)?;
+    Ok(())
+}
+
+/// Handle /queue command - toggle queue mode per chat
+/// When ON: messages sent while AI is busy are queued and processed sequentially
+/// When OFF: messages sent while AI is busy are rejected (default behavior)
+async fn handle_queue_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let (next, queue_len) = {
+        let mut data = state.lock().await;
+        let key = chat_id.0.to_string();
+        let prev = data.settings.queue.get(&key).copied().unwrap_or(QUEUE_MODE_DEFAULT);
+        let next = !prev;
+        data.settings.queue.insert(key, next);
+        save_bot_settings(token, &data.settings);
+        // If turning OFF, clear any pending queued messages
+        let queue_len = if !next {
+            let q = data.message_queues.remove(&chat_id);
+            let cleared = q.as_ref().map(|q| q.len()).unwrap_or(0);
+            msg_debug(&format!("[queue:toggle] chat_id={}, OFF, cleared {} queued messages", chat_id.0, cleared));
+            cleared
+        } else {
+            msg_debug(&format!("[queue:toggle] chat_id={}, ON", chat_id.0));
+            0
+        };
+        (next, queue_len)
+    };
+    let status = if next {
+        "📋 Queue mode: ON\nMessages sent while AI is busy will be queued and processed in order.".to_string()
+    } else if queue_len > 0 {
+        format!("📋 Queue mode: OFF\n{} queued message(s) cleared.", queue_len)
+    } else {
+        "📋 Queue mode: OFF".to_string()
+    };
+    shared_rate_limit_wait(state, chat_id).await;
+    tg!("send_message", bot.send_message(chat_id, &status).await)?;
     Ok(())
 }
 
@@ -5362,7 +5786,7 @@ async fn handle_public_command(
         }
         "" => {
             let data = state.lock().await;
-            let is_public = data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(false);
+            let is_public = data.settings.as_public_for_group_chat.get(&chat_key).copied().unwrap_or(PUBLIC_MODE_DEFAULT);
             let status = if is_public { "enabled" } else { "disabled" };
             format!(
                 "Public access is currently <b>{}</b> for this group.\n\n\
@@ -5543,6 +5967,69 @@ async fn handle_model_command(
     Ok(())
 }
 
+/// After an AI request finishes (normal completion or cancellation), check the message queue
+/// and process the next queued message if queue mode is enabled.
+/// This must be called AFTER cancel_tokens.remove().
+/// Returns a boxed future to break the recursive async cycle with handle_text_message.
+fn process_next_queued_message<'a>(
+    bot: &'a Bot,
+    chat_id: ChatId,
+    state: &'a SharedState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        msg_debug(&format!("[queue:next] chat_id={}, checking for next queued message", chat_id.0));
+        let next_msg = {
+            let mut data = state.lock().await;
+            let qkey = chat_id.0.to_string();
+            let queue_enabled = data.settings.queue.get(&qkey).copied().unwrap_or(QUEUE_MODE_DEFAULT);
+            if !queue_enabled {
+                msg_debug(&format!("[queue:next] chat_id={}, queue mode OFF, skipping", chat_id.0));
+                return;
+            }
+            let queue_len_before = data.message_queues.get(&chat_id).map_or(0, |q| q.len());
+            let msg = data.message_queues.get_mut(&chat_id).and_then(|q| q.pop_front());
+            // Restore pending_uploads captured at queue time so handle_text_message picks them up
+            if let Some(ref m) = msg {
+                msg_debug(&format!("[queue:next] chat_id={}, popped message: text={:?}, user={:?}, uploads={}, queue_before={}", chat_id.0, truncate_str(&m.text, 60), m.user_display_name, m.pending_uploads.len(), queue_len_before));
+                if !m.pending_uploads.is_empty() {
+                    if let Some(session) = data.sessions.get_mut(&chat_id) {
+                        session.pending_uploads.extend(m.pending_uploads.iter().cloned());
+                        msg_debug(&format!("[queue:next] chat_id={}, restored {} pending_uploads to session", chat_id.0, m.pending_uploads.len()));
+                    } else {
+                        msg_debug(&format!("[queue:next] chat_id={}, WARNING: no session to restore uploads to", chat_id.0));
+                    }
+                }
+                // Insert placeholder cancel_token so new messages see "busy" during Dequeued notification.
+                // Without this, messages arriving between pop and handle_text_message's cancel_token insert
+                // would see "not busy" and bypass the queue (FIFO violation).
+                // handle_text_message will overwrite this with its own real cancel_token.
+                data.cancel_tokens.insert(chat_id, Arc::new(CancelToken::new()));
+                msg_debug(&format!("[queue:next] chat_id={}, placeholder cancel_token inserted", chat_id.0));
+            } else {
+                msg_debug(&format!("[queue:next] chat_id={}, queue empty (len was {})", chat_id.0, queue_len_before));
+            }
+            // Clean up empty queue entry to prevent memory leak
+            if data.message_queues.get(&chat_id).map_or(false, |q| q.is_empty()) {
+                data.message_queues.remove(&chat_id);
+                msg_debug(&format!("[queue:next] chat_id={}, removed empty queue entry", chat_id.0));
+            }
+            msg
+        };
+
+        if let Some(queued) = next_msg {
+            msg_debug(&format!("[queue:next] chat_id={}, dispatching id={}, text={:?}", chat_id.0, queued.id, truncate_str(&queued.text, 60)));
+            shared_rate_limit_wait(state, chat_id).await;
+            let _ = tg!("send_message", bot.send_message(chat_id, &format!("Dequeued ({})", queued.id)).await);
+
+            if let Err(e) = handle_text_message(bot, chat_id, &queued.text, state, &queued.user_display_name).await {
+                msg_debug(&format!("[queue:next] chat_id={}, id={}, handle_text_message FAILED: {}", chat_id.0, queued.id, e));
+            } else {
+                msg_debug(&format!("[queue:next] chat_id={}, id={}, handle_text_message completed OK", chat_id.0, queued.id));
+            }
+        }
+    })
+}
+
 /// Handle regular text messages - send to Claude AI
 async fn handle_text_message(
     bot: &Bot,
@@ -5566,7 +6053,10 @@ async fn handle_text_message(
 
     // Check if cancelled during lock wait (e.g., user sent /stop)
     if cancel_token.cancelled.load(Ordering::Relaxed) {
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=text_cancelled_during_lock", chat_id.0));
         { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+        drop(group_lock); // release before queue processing to avoid deadlock
+        process_next_queued_message(bot, chat_id, state).await;
         return Ok(());
     }
 
@@ -5599,7 +6089,15 @@ async fn handle_text_message(
     let (session_id, current_path) = match session_info {
         Some(info) => info,
         None => {
-            { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+            {
+                let mut data = state.lock().await;
+                data.cancel_tokens.remove(&chat_id);
+                // Clear queue — queued messages would also fail without a session
+                let cleared = data.message_queues.remove(&chat_id).map(|q| q.len()).unwrap_or(0);
+                if cleared > 0 {
+                    msg_debug(&format!("[queue:clear] chat_id={}, no session, cleared {} queued messages", chat_id.0, cleared));
+                }
+            }
             shared_rate_limit_wait(state, chat_id).await;
             tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.")
                 .await)?;
@@ -5616,7 +6114,10 @@ async fn handle_text_message(
     let placeholder = match tg!("send_message", bot.send_message(chat_id, "...").await) {
         Ok(m) => m,
         Err(e) => {
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=text_placeholder_error", chat_id.0));
             { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+            drop(group_lock); // release before queue processing to avoid deadlock
+            process_next_queued_message(bot, chat_id, state).await;
             return Err(e);
         }
     };
@@ -6410,6 +6911,10 @@ async fn handle_text_message(
             }
             data.cancel_tokens.remove(&chat_id);
             data.stop_message_ids.remove(&chat_id);
+            drop(data);
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=text_poll_cancelled", chat_id.0));
+            drop(_group_lock); // release group chat lock before processing queue
+            process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
             return;
         }
 
@@ -6425,6 +6930,9 @@ async fn handle_text_message(
             shared_rate_limit_wait(&state_owned, chat_id).await;
             let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
         }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=text_poll_completed", chat_id.0));
+        drop(_group_lock); // release group chat lock before processing queue
+        process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
     });
 
     Ok(())
@@ -7486,14 +7994,30 @@ async fn execute_schedule(
     let group_lock = acquire_group_chat_lock(chat_id.0).await;
 
     // Check if cancelled during lock wait
-    {
+    let cancelled_during_wait = {
         let data = state.lock().await;
-        if let Some(ct) = data.cancel_tokens.get(&chat_id) {
-            if ct.cancelled.load(Ordering::Relaxed) {
-                sched_debug(&format!("[execute_schedule] cancelled during lock wait, id={}", entry.id));
-                return;
+        data.cancel_tokens.get(&chat_id)
+            .map(|ct| ct.cancelled.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    };
+    if cancelled_during_wait {
+        sched_debug(&format!("[execute_schedule] cancelled during lock wait, id={}", entry.id));
+        {
+            let mut data = state.lock().await;
+            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                set.remove(&entry.id);
+            }
+            data.cancel_tokens.remove(&chat_id);
+            if let Some(prev) = prev_session {
+                data.sessions.insert(chat_id, prev);
+            } else {
+                data.sessions.remove(&chat_id);
             }
         }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=schedule_cancelled_during_lock", chat_id.0));
+        drop(group_lock);
+        process_next_queued_message(bot, chat_id, state).await;
+        return;
     }
 
     // Build prompt with context summary if available
@@ -7523,16 +8047,21 @@ async fn execute_schedule(
     let Some(home) = dirs::home_dir() else {
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] ⚠ [Schedule] Failed to get home directory");
-        let mut data = state.lock().await;
-        if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
-            set.remove(&schedule_id);
+        {
+            let mut data = state.lock().await;
+            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                set.remove(&schedule_id);
+            }
+            data.cancel_tokens.remove(&chat_id);
+            if let Some(prev) = prev_session {
+                data.sessions.insert(chat_id, prev);
+            } else {
+                data.sessions.remove(&chat_id);
+            }
         }
-        data.cancel_tokens.remove(&chat_id);
-        if let Some(prev) = prev_session {
-            data.sessions.insert(chat_id, prev);
-        } else {
-            data.sessions.remove(&chat_id);
-        }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=schedule_no_home", chat_id.0));
+        drop(group_lock); // release before queue processing to avoid deadlock
+        process_next_queued_message(bot, chat_id, state).await;
         return;
     };
     let workspace_dir = home.join(".cokacdir").join("workspace").join(&schedule_id);
@@ -7541,16 +8070,21 @@ async fn execute_schedule(
         let ts = chrono::Local::now().format("%H:%M:%S");
         println!("  [{ts}] ⚠ [Schedule] Failed to create workspace: {e}");
         sched_debug(&format!("[execute_schedule] id={}, workspace creation failed: {}, restoring session", schedule_id, e));
-        let mut data = state.lock().await;
-        if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
-            set.remove(&schedule_id);
+        {
+            let mut data = state.lock().await;
+            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                set.remove(&schedule_id);
+            }
+            data.cancel_tokens.remove(&chat_id);
+            if let Some(prev) = prev_session {
+                data.sessions.insert(chat_id, prev);
+            } else {
+                data.sessions.remove(&chat_id);
+            }
         }
-        data.cancel_tokens.remove(&chat_id);
-        if let Some(prev) = prev_session {
-            data.sessions.insert(chat_id, prev);
-        } else {
-            data.sessions.remove(&chat_id);
-        }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=schedule_workspace_error", chat_id.0));
+        drop(group_lock); // release before queue processing to avoid deadlock
+        process_next_queued_message(bot, chat_id, state).await;
         return;
     }
     let workspace_path = workspace_dir.display().to_string();
@@ -7569,16 +8103,21 @@ async fn execute_schedule(
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ⚠ [Schedule] Failed to send placeholder: {e}");
             // Clean up pending + cancel_token, restore session (workspace preserved)
-            let mut data = state.lock().await;
-            if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
-                set.remove(&schedule_id);
+            {
+                let mut data = state.lock().await;
+                if let Some(set) = data.pending_schedules.get_mut(&chat_id) {
+                    set.remove(&schedule_id);
+                }
+                data.cancel_tokens.remove(&chat_id);
+                if let Some(prev) = prev_session {
+                    data.sessions.insert(chat_id, prev);
+                } else {
+                    data.sessions.remove(&chat_id);
+                }
             }
-            data.cancel_tokens.remove(&chat_id);
-            if let Some(prev) = prev_session {
-                data.sessions.insert(chat_id, prev);
-            } else {
-                data.sessions.remove(&chat_id);
-            }
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=schedule_placeholder_error", chat_id.0));
+            drop(group_lock); // release before queue processing to avoid deadlock
+            process_next_queued_message(bot, chat_id, state).await;
             return;
         }
     };
@@ -8243,6 +8782,9 @@ async fn execute_schedule(
             shared_rate_limit_wait(&state_owned, chat_id).await;
             let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
         }
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=schedule_poll_completed", chat_id.0));
+        drop(_group_lock); // release group chat lock before processing queue
+        process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
     });
 }
 
@@ -8272,7 +8814,10 @@ async fn process_bot_message(
     // Check if cancelled during lock wait
     if cancel_token.cancelled.load(Ordering::Relaxed) {
         msg_debug(&format!("[process_bot_message] cancelled during lock wait, id={}", msg.id));
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=botmsg_cancelled_during_lock", chat_id.0));
         { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+        drop(group_lock); // release before queue processing to avoid deadlock
+        process_next_queued_message(bot, chat_id, state).await;
         return;
     }
 
@@ -8308,7 +8853,14 @@ async fn process_bot_message(
         None => {
             // No active session — create an error response
             msg_debug(&format!("[process_bot_message] no session for chat_id={}, sending error response", chat_id.0));
-            { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+            {
+                let mut data = state.lock().await;
+                data.cancel_tokens.remove(&chat_id);
+                let cleared = data.message_queues.remove(&chat_id).map(|q| q.len()).unwrap_or(0);
+                if cleared > 0 {
+                    msg_debug(&format!("[queue:clear] chat_id={}, no session (bot msg), cleared {} queued messages", chat_id.0, cleared));
+                }
+            }
             shared_rate_limit_wait(state, chat_id).await;
             let _ = tg!("send_message", bot.send_message(chat_id,
                 format!("📨 @{}: {}\n\n⚠️ No active session. Use /start <path> first.",
@@ -8328,7 +8880,10 @@ async fn process_bot_message(
         }
         Err(e) => {
             msg_debug(&format!("[process_bot_message] failed to send placeholder: {}, aborting", e));
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=botmsg_placeholder_error", chat_id.0));
             { let mut data = state.lock().await; data.cancel_tokens.remove(&chat_id); }
+            drop(group_lock); // release before queue processing to avoid deadlock
+            process_next_queued_message(bot, chat_id, state).await;
             return;
         }
     };
@@ -9059,6 +9614,9 @@ async fn process_bot_message(
                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
             }
             msg_debug(&format!("[botmsg_poll:{}] cancel cleanup done", bmsg_id_for_log));
+            msg_debug(&format!("[queue:trigger] chat_id={}, source=botmsg_poll_cancelled", chat_id.0));
+            drop(_group_lock); // release group chat lock before processing queue
+            process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
             return;
         }
 
@@ -9077,6 +9635,9 @@ async fn process_bot_message(
             let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
         }
         msg_debug(&format!("[botmsg_poll:{}] END", bmsg_id_for_log));
+        msg_debug(&format!("[queue:trigger] chat_id={}, source=botmsg_poll_completed", chat_id.0));
+        drop(_group_lock); // release group chat lock before processing queue
+        process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
     });
     msg_debug(&format!("[process_bot_message] END (tasks spawned) id={}", msg.id));
 }

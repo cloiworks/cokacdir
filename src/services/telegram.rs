@@ -200,11 +200,12 @@ struct GroupChatLock {
     _file: std::fs::File,
 }
 
-/// Acquire exclusive file lock for a chat (async, non-blocking).
-/// Returns None if lock file cannot be created.
-/// Polls with sleep until the lock is acquired.
+/// Acquire exclusive file lock for a group chat (async, non-blocking).
+/// Returns None for private chats (chat_id >= 0) or if lock file cannot be created.
+/// For group chats, polls with sleep until the lock is acquired.
 async fn acquire_group_chat_lock(chat_id: i64) -> Option<GroupChatLock> {
     use fs2::FileExt;
+    if chat_id >= 0 { return None; }
     let dir = dirs::home_dir()?.join(".cokacdir").join("chat_locks");
     let _ = std::fs::create_dir_all(&dir);
     let lock_path = dir.join(format!("{}.lock", chat_id));

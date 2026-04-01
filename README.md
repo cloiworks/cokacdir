@@ -1,85 +1,101 @@
 # COKACDIR
 
-**AI Coding Agent You Can Run From Telegram.**
+**이미 쓰고 있는 코딩 에이전트를 텔레그램에서.**
 
-Turn any Telegram chat into a full AI coding environment. Send a message to your bot, and it executes code, edits files, runs shell commands, and streams results back in real time — all from your phone or any device with Telegram. Supports Claude Code, Codex CLI, Gemini CLI, and OpenCode as AI backends with seamless cross-provider session management.
+cokacdir은 AI 에이전트가 아닙니다 — LLM이나 추론 엔진을 내장하고 있지 않습니다. 이미 사용 중인 코딩 에이전트(Claude Code, Codex CLI, Gemini CLI, OpenCode)에게 작업을 위임하고, 텔레그램에서 제어할 수 있게 해줍니다. 봇에 메시지를 보내면 에이전트가 코드 실행, 파일 편집, 셸 명령 실행, 결과 실시간 스트리밍까지 모두 처리합니다 — 스마트폰이나 텔레그램이 설치된 어떤 기기에서든 가능합니다.
 
-Also works as a standalone multi-panel terminal file manager with AI-powered natural language commands — press `.` and describe what you want.
+각 에이전트의 기존 구독(또는 무료 티어) 안에서 동작하므로 추가 API 비용이 없습니다.
 
-## Features
+## 빠른 시작
 
-- **Blazing Fast**: Written in Rust for maximum performance. Single binary (15-20MB depending on platform), optimized with LTO and strip.
-- **AI-Powered Commands**: Natural language coding and file management powered by Claude, Codex, Gemini & OpenCode. Press `.` and describe what you want.
-- **Multi-Panel Navigation**: Dynamic multi-panel interface for efficient file management
-- **Keyboard Driven**: Full keyboard navigation designed for power users
-- **Built-in Editor**: Edit files with syntax highlighting for 20+ languages
-- **Image Viewer**: View images directly in terminal (Kitty, iTerm2, Sixel protocols) with zoom and pan
-- **Process Manager**: Monitor and manage system processes with sortable columns
-- **File Search**: Find files by name pattern with recursive search
-- **Diff Compare**: Side-by-side folder and file comparison
-- **Git Integration**: Built-in git status, commit, log, branch management and inter-commit diff
-- **Remote SSH/SFTP**: Browse remote servers via SSH/SFTP with saved profiles
-- **File Encryption**: AES-256 encryption with configurable chunk splitting
-- **Duplicate Finder**: Detect and manage duplicate files with hash-based comparison
-- **Telegram Bot**: Control your AI coding sessions remotely via Telegram with streaming output
-- **Customizable Themes**: Light/Dark themes with full JSON-based color customization
-
-## Installation & AI Setup
-
-For installation instructions, AI provider setup, and keyboard shortcuts, visit:
-
-**[https://cokacdir.cokac.com](https://cokacdir.cokac.com)**
-
-Supports 4 AI providers: **Claude Code**, **Codex CLI**, **Gemini CLI**, and **OpenCode**.
-
-## Telegram Bot
-
-Run your AI coding sessions remotely via Telegram:
-
+**macOS / Linux:**
 ```bash
-cokacdir --ccserver <TELEGRAM_BOT_TOKEN> [TOKEN2] ...
+curl -fsSL https://cokacdir.cokac.com/manage.sh | bash && cokacctl
 ```
 
-**Capabilities:**
-- Multi-provider support (Claude, Codex, Gemini, OpenCode) with live streaming
-- Session persistence and cross-provider session resolution
-- Scheduled tasks with cron expressions or absolute times
-- Group chat support with shared context across multiple bots
-- Bot-to-bot messaging for multi-agent workflows
-- File upload/download, tool management, and debug logging
+**Windows (PowerShell):**
+```powershell
+irm https://cokacdir.cokac.com/manage.ps1 | iex; cokacctl
+```
 
-**Commands:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
+위 명령을 실행하면 cokacdir 관리 TUI가 열립니다. 이후:
 
-## Supported Platforms
+1. **`i`**를 눌러 cokacdir 설치
+2. 설치 완료 후 텔레그램 봇 토큰 입력 ([@BotFather](https://t.me/botfather)에서 생성)
+3. **`s`**를 눌러 서버 시작
+
+끝입니다 — 텔레그램을 열고 봇과 대화를 시작하세요.
+
+## 주요 기능
+
+- **초고속 성능**: Rust로 작성되어 최고의 성능을 제공합니다. 단일 바이너리(플랫폼에 따라 15-20MB), LTO와 strip으로 최적화.
+- **AI 기반 명령**: Claude, Codex, Gemini, OpenCode로 구동되는 자연어 코딩 및 파일 관리. `.`을 누르고 원하는 작업을 설명하세요.
+- **멀티패널 탐색**: 효율적인 파일 관리를 위한 동적 멀티패널 인터페이스
+- **키보드 중심**: 파워 유저를 위한 완전한 키보드 내비게이션
+- **내장 편집기**: 20개 이상 언어의 구문 강조 기능이 있는 파일 편집
+- **이미지 뷰어**: 터미널에서 직접 이미지 보기 (Kitty, iTerm2, Sixel 프로토콜), 줌 및 팬 지원
+- **프로세스 관리자**: 정렬 가능한 컬럼으로 시스템 프로세스 모니터링 및 관리
+- **파일 검색**: 이름 패턴으로 재귀 파일 검색
+- **비교(Diff)**: 폴더 및 파일의 나란히 비교
+- **Git 통합**: 내장 git 상태, 커밋, 로그, 브랜치 관리 및 커밋 간 diff
+- **원격 SSH/SFTP**: 저장된 프로필로 SSH/SFTP 원격 서버 탐색
+- **파일 암호화**: 설정 가능한 청크 분할 방식의 AES-256 암호화
+- **중복 파일 탐지**: 해시 기반 비교로 중복 파일 감지 및 관리
+- **텔레그램 봇**: 스트리밍 출력으로 텔레그램을 통해 AI 코딩 세션을 원격 제어
+- **커스터마이즈 가능한 테마**: JSON 기반의 완전한 색상 커스터마이징이 가능한 라이트/다크 테마
+
+## 커뮤니티
+
+팁, 업데이트, 지원을 위한 텔레그램 그룹:
+**[@cokacvibe](https://t.me/cokacvibe)**
+
+## 문서
+
+AI 프로바이더 설정, 키보드 단축키, 상세 문서는 다음을 방문하세요:
+**[https://cokacdir.cokac.com](https://cokacdir.cokac.com)**
+
+## 텔레그램 봇
+
+**기능:**
+- 멀티 프로바이더 지원 (Claude, Codex, Gemini, OpenCode) 및 실시간 스트리밍
+- 세션 영속성 및 크로스 프로바이더 세션 해석
+- cron 표현식 또는 절대 시간을 이용한 예약 작업
+- 여러 봇이 컨텍스트를 공유하는 그룹 채팅 지원
+- 멀티 에이전트 워크플로우를 위한 봇 간 메시징
+- 파일 업로드/다운로드, 도구 관리, 디버그 로깅
+
+**명령어:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
+
+## 지원 플랫폼
 
 - macOS (Apple Silicon & Intel)
 - Linux (x86_64 & ARM64)
 - Windows (x86_64 & ARM64)
 
-## License
+## 라이선스
 
 MIT License
 
-## Author
+## 저자
 
 cokac <monogatree@gmail.com>
 
-Homepage: https://cokacdir.cokac.com
+홈페이지: https://cokacdir.cokac.com
 
-## Disclaimer
+## 면책 조항
 
-THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+이 소프트웨어는 상품성, 특정 목적에의 적합성 및 비침해성에 대한 보증을 포함하되 이에 국한되지 않는, 명시적이거나 묵시적인 어떠한 종류의 보증도 없이 "있는 그대로" 제공됩니다.
 
-IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+어떠한 경우에도 저자, 저작권 보유자 또는 기여자는 이 소프트웨어 또는 이 소프트웨어의 사용과 관련하여 발생하는 계약, 불법행위 또는 기타 사유에 의한 청구, 손해 또는 기타 책임에 대해 책임을 지지 않습니다.
 
-This includes, without limitation:
+여기에는 다음이 포함되며 이에 국한되지 않습니다:
 
-- Data loss or corruption
-- System damage or malfunction
-- Security breaches or vulnerabilities
-- Financial losses
-- Any direct, indirect, incidental, special, exemplary, or consequential damages
+- 데이터 손실 또는 손상
+- 시스템 손상 또는 오작동
+- 보안 침해 또는 취약점
+- 금전적 손실
+- 직접적, 간접적, 부수적, 특별, 징벌적 또는 결과적 손해
 
-The user assumes full responsibility for all consequences arising from the use of this software, regardless of whether such use was intended, authorized, or anticipated.
+사용자는 해당 사용이 의도되었든, 승인되었든, 예상되었든 관계없이, 이 소프트웨어 사용으로 인해 발생하는 모든 결과에 대해 전적으로 책임을 집니다.
 
-**USE AT YOUR OWN RISK.**
+**사용에 따른 모든 위험은 사용자에게 있습니다.**

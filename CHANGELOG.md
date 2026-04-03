@@ -1,11 +1,5 @@
 # Changelog — cokacdir
 
-> All notable changes are documented here, newest first.
-> Each version is identified by running the actual binary: `cokacdir-linux-aarch64 --version`.
-> A new version entry is created only when the binary in `dist_beta/` actually changes (verified by git blob hash).
-
----
-
 ## 0.4.80 — 2026-04-03
 
 - **Very long AI responses are now sent as a file attachment** instead of flooding the chat with many consecutive messages. Responses over ~8,000 characters are delivered as a downloadable `.txt` file.

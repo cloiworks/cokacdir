@@ -12,7 +12,7 @@ export default function Footer() {
             <span className="text-zinc-500 text-sm">{t('AI Coding Agents, Anywhere', 'AI 코딩 에이전트, 어디서나')}</span>
           </div>
           <div className="flex items-center gap-6">
-            <a href="#/docs/installation" className="text-zinc-400 hover:text-white text-sm transition-colors">
+            <a href="#/docs/install-windows" className="text-zinc-400 hover:text-white text-sm transition-colors">
               {t('Docs', '문서')}
             </a>
             <a

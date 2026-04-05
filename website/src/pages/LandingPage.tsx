@@ -134,7 +134,7 @@ export default function LandingPage() {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-8">
             <Link
-              to="/docs/installation"
+              to="/docs/install-windows"
               className="px-8 py-3 bg-accent-cyan text-bg-dark font-semibold rounded-lg hover:bg-accent-cyan/90 transition-colors glow-cyan flex items-center gap-2"
             >
               {t('Get Started', '시작하기')} <ArrowRight size={18} />
@@ -280,7 +280,7 @@ export default function LandingPage() {
 
           <div className="text-center mt-12">
             <Link
-              to="/docs/installation"
+              to="/docs/install-windows"
               className="inline-flex items-center gap-2 text-accent-cyan hover:text-accent-cyan/80 font-medium transition-colors"
             >
               {t('Read the full installation guide', '설치 가이드 전체 보기')} <ArrowRight size={16} />

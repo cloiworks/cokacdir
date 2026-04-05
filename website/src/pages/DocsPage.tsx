@@ -5,7 +5,7 @@ import DocsSidebar from '../components/docs/DocsSidebar'
 import DocsContent from '../components/docs/DocsContent'
 import { LangToggle } from '../components/LanguageContext'
 
-const DEFAULT_SECTION = 'installation'
+const DEFAULT_SECTION = 'install-windows'
 
 export default function DocsPage() {
   const { sectionId } = useParams()

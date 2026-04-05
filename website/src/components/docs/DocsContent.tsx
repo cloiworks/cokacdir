@@ -2,11 +2,12 @@ import { Link } from 'react-router-dom'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useLanguage } from '../LanguageContext'
 import { getAllSections } from './DocsSidebar'
-import Installation from './sections/Installation'
+import InstallWindows from './sections/InstallWindows'
+import InstallMacOS from './sections/InstallMacOS'
+import InstallLinux from './sections/InstallLinux'
+import EC2Setup from './sections/EC2Setup'
 import TelegramBotSetup from './sections/TelegramBotSetup'
 import DiscordBotSetup from './sections/DiscordBotSetup'
-import ClaudeCodeWindows from './sections/ClaudeCodeWindows'
-import CodexWindows from './sections/CodexWindows'
 import TokenManagement from './sections/TokenManagement'
 import FirstChat from './sections/FirstChat'
 import Updating from './sections/Updating'
@@ -22,11 +23,12 @@ import CustomInstructions from './sections/CustomInstructions'
 import Settings from './sections/Settings'
 
 const sectionComponents: Record<string, React.ComponentType> = {
-  'installation': Installation,
+  'install-windows': InstallWindows,
+  'install-macos': InstallMacOS,
+  'install-linux': InstallLinux,
+  'install-ec2': EC2Setup,
   'telegram-bot': TelegramBotSetup,
   'discord-bot': DiscordBotSetup,
-  'claude-code-windows': ClaudeCodeWindows,
-  'codex-windows': CodexWindows,
   'token-management': TokenManagement,
   'first-chat': FirstChat,
   'update': Updating,
@@ -51,7 +53,7 @@ export default function DocsContent({ sectionId }: { sectionId: string }) {
     return (
       <div className="text-center py-20">
         <p className="text-zinc-500 text-lg">{t('Section not found.', '섹션을 찾을 수 없습니다.')}</p>
-        <Link to="/docs/installation" className="text-accent-cyan hover:underline mt-4 inline-block">
+        <Link to="/docs/install-windows" className="text-accent-cyan hover:underline mt-4 inline-block">
           {t('Go to Installation', '설치 페이지로 이동')}
         </Link>
       </div>

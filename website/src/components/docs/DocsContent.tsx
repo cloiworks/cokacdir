@@ -21,6 +21,7 @@ import MultipleChats from './sections/MultipleChats'
 import ToolManagement from './sections/ToolManagement'
 import CustomInstructions from './sections/CustomInstructions'
 import Settings from './sections/Settings'
+import EnvironmentVariables from './sections/EnvironmentVariables'
 
 const sectionComponents: Record<string, React.ComponentType> = {
   'install-windows': InstallWindows,
@@ -42,6 +43,7 @@ const sectionComponents: Record<string, React.ComponentType> = {
   'tool-management': ToolManagement,
   'instructions': CustomInstructions,
   'settings': Settings,
+  'env-vars': EnvironmentVariables,
 }
 
 export default function DocsContent({ sectionId }: { sectionId: string }) {

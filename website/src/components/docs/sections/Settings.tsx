@@ -1,4 +1,5 @@
-import { SectionTitle, SubSection, P, InfoBox, CommandTable } from '../DocComponents'
+import { Link } from 'react-router-dom'
+import { SectionTitle, SubSection, P, IC, InfoBox, CommandTable } from '../DocComponents'
 import { useLanguage } from '../../LanguageContext'
 
 export default function Settings() {
@@ -16,6 +17,7 @@ export default function Settings() {
             ['/debug', String(t('Enable/disable debug logging', '디버그 로깅 활성화/비활성화'))],
             ['/greeting', String(t('Toggle startup greeting style (Compact / Full)', '시작 인사 스타일 전환 (간략 / 전체)'))],
             ['/setpollingtime <ms>', String(t('Set API polling interval', 'API 폴링 간격 설정'))],
+            ['/envvars', String(t('Show all environment variables (owner only)', '모든 환경변수 표시 (소유자 전용)'))],
             ['/help', String(t('Display full command reference', '전체 명령어 참조 표시'))],
           ]}
         />
@@ -58,6 +60,27 @@ export default function Settings() {
           <li>{t(<>Minimum: <strong className="text-zinc-300">2500ms</strong></>, <>최소: <strong className="text-zinc-300">2500ms</strong></>)}</li>
           <li>{t(<>Recommended: <strong className="text-zinc-300">3000ms or higher</strong></>, <>권장: <strong className="text-zinc-300">3000ms 이상</strong></>)}</li>
         </ul>
+      </SubSection>
+
+      <SubSection title="/envvars">
+        <P>{t(
+          <>Prints every environment variable currently visible to the bot process, sorted alphabetically. <strong>Bot owner only.</strong></>,
+          <>봇 프로세스에 현재 보이는 모든 환경변수를 알파벳순으로 출력합니다. <strong>봇 소유자 전용입니다.</strong></>
+        )}</P>
+        <P>{t(
+          <>Useful for verifying that <IC>~/.cokacdir/.env.json</IC> loaded correctly, or checking whether a <IC>COKAC_*</IC> override is active.</>,
+          <><IC>~/.cokacdir/.env.json</IC>이 올바르게 로드되었는지, 또는 <IC>COKAC_*</IC> 재지정이 활성 상태인지 확인할 때 유용합니다.</>
+        )}</P>
+        <InfoBox type="warning">
+          {t(
+            <><strong>⚠ Security warning:</strong> <IC>/envvars</IC> exposes <strong>all</strong> environment variables with no redaction — including API keys, tokens, and credentials. Telegram stores message history on its servers, so anything printed by this command is persisted until you delete the messages. Use it only for diagnostics, clear the response afterward, and <strong>always use it in a 1:1 chat</strong> — never in a group chat. When the owner runs <IC>/envvars</IC> in a group, the response is a normal group message that every member sees, regardless of the <IC>/public</IC> setting.</>,
+            <><strong>⚠ 보안 경고:</strong> <IC>/envvars</IC>는 API 키, 토큰, 자격 증명을 포함한 <strong>모든</strong> 환경변수를 마스킹 없이 노출합니다. Telegram은 메시지 기록을 서버에 저장하므로, 이 명령으로 출력된 내용은 메시지를 삭제할 때까지 남아 있습니다. 진단 용도로만 사용하고, 사용 후에는 응답을 삭제하며, <strong>항상 1:1 채팅에서만 사용하세요</strong> — 절대 그룹 채팅에서는 사용하지 마세요. 소유자가 그룹에서 <IC>/envvars</IC>를 실행하면, 응답은 <IC>/public</IC> 설정과 무관하게 그룹의 모든 멤버가 보는 일반 그룹 메시지가 됩니다.</>
+          )}
+        </InfoBox>
+        <P>{t(
+          <>See <Link to="/docs/env-vars" className="text-accent-cyan hover:underline">Environment Variables</Link> for the full list of variables cokacdir reads and for the <IC>~/.cokacdir/.env.json</IC> auto-loader.</>,
+          <>cokacdir가 읽는 변수 전체 목록과 <IC>~/.cokacdir/.env.json</IC> 자동 로더에 대해서는 <Link to="/docs/env-vars" className="text-accent-cyan hover:underline">환경변수</Link> 페이지를 참조하세요.</>
+        )}</P>
       </SubSection>
 
       <SubSection title="/help">

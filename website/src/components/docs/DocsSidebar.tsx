@@ -54,6 +54,7 @@ const categories: SidebarCategory[] = [
       { id: 'tool-management', en: 'Tool Management', ko: '도구 관리' },
       { id: 'instructions', en: 'Custom Instructions', ko: '커스텀 지시사항' },
       { id: 'settings', en: 'Settings', ko: '설정' },
+      { id: 'env-vars', en: 'Environment Variables', ko: '환경변수' },
     ],
   },
 ]

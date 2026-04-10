@@ -25,13 +25,24 @@ export default function TelegramBotSetup() {
           <StepItem number={5} title={String(t('Copy the token', '토큰 복사'))}>
             {t('BotFather will respond with your bot token. Copy it and save it securely.', 'BotFather가 봇 토큰을 응답합니다. 복사하여 안전하게 보관하세요.')}
           </StepItem>
-          <StepItem number={6} title={String(t('Disable privacy mode', '프라이버시 모드 비활성화'))}>
+          <StepItem number={6} title={String(t('Disable privacy mode (required for group chats)', '프라이버시 모드 비활성화 (그룹 채팅 필수)'))}>
             {t(
               <>Send <IC>/setprivacy</IC> to BotFather, select your bot, and choose <strong>Disable</strong>. This allows the bot to receive all messages in group chats.</>,
               <>BotFather에게 <IC>/setprivacy</IC>를 전송하고, 봇을 선택한 후 <strong>Disable</strong>을 선택하세요. 그룹 채팅에서 모든 메시지를 수신할 수 있게 됩니다.</>
             )}
           </StepItem>
         </StepList>
+
+        <InfoBox type="warning">
+          {t(
+            <>
+              <strong>Step 6 is mandatory if you ever plan to use this bot in a group chat.</strong> With privacy mode enabled, Telegram only delivers <IC>/</IC> commands, <IC>@mentions</IC>, and direct replies to the bot — regular group messages (including the <IC>;</IC> and <IC>!</IC> prefixes used by cokacdir) will not reach it, and group chat features will silently fail. You must do this for <strong>every</strong> bot you intend to use in a group.
+            </>,
+            <>
+              <strong>이 봇을 그룹 채팅에서 사용할 계획이 조금이라도 있다면 Step 6은 필수입니다.</strong> 프라이버시 모드가 켜져 있으면 Telegram은 <IC>/</IC> 명령, <IC>@mentions</IC>, 직접 답장 메시지만 봇에게 전달합니다 — cokacdir가 사용하는 <IC>;</IC>·<IC>!</IC> 프리픽스를 포함한 일반 그룹 메시지는 봇에게 도달하지 않아, 그룹 채팅 기능이 조용히 실패합니다. 그룹에서 쓸 <strong>모든</strong> 봇에 대해 이 설정을 해야 합니다.
+            </>
+          )}
+        </InfoBox>
       </SubSection>
 
       <SubSection title={String(t('Register Token', '토큰 등록'))}>

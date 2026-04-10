@@ -67,7 +67,11 @@ For AI provider setup, keyboard shortcuts, and detailed documentation, visit:
 * Bot-to-bot messaging for multi-agent workflows
 * File upload/download, tool management, debug logging
 
-**Commands:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`
+**Commands:** `/start`, `/stop`, `/clear`, `/help`, `/session`, `/pwd`, `/model`, `/down`, `/instruction`, `/instruction_clear`, `/allowed`, `/allowedtools`, `/availabletools`, `/context`, `/query`, `/public`, `/direct`, `/setpollingtime`, `/debug`, `/silent`, `/envvars`
+
+## Configuration
+
+cokacdir reads environment variables at startup to override binary paths (`COKAC_CLAUDE_PATH`, `COKAC_CODEX_PATH`, `COKAC_GEMINI_PATH`, `COKAC_OPENCODE_PATH`), tune the file-attachment threshold (`COKAC_FILE_ATTACH_THRESHOLD`), and enable debug logging (`COKACDIR_DEBUG=1`). Variables can be set either in your shell environment or in a JSON file at `~/.cokacdir/.env.json` (values in that file take priority). Use the `/envvars` Telegram command (bot-owner only, 1:1 chat only) to inspect which values are active in the running process. See the [Environment Variables guide](https://cokacdir.cokac.com/docs/env-vars) for the full reference.
 
 ## Supported Platforms
 

@@ -2534,14 +2534,22 @@ impl App {
         let code_cmd = if Command::new("which")
             .arg("code")
             .output()
-            .map(|o| o.status.success())
+            .map(|o| {
+                if !o.status.success() { return false; }
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !p.is_empty() && std::path::Path::new(&p).exists()
+            })
             .unwrap_or(false)
         {
             "code"
         } else if Command::new("which")
             .arg("code-insiders")
             .output()
-            .map(|o| o.status.success())
+            .map(|o| {
+                if !o.status.success() { return false; }
+                let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                !p.is_empty() && std::path::Path::new(&p).exists()
+            })
             .unwrap_or(false)
         {
             "code-insiders"

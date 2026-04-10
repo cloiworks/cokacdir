@@ -1767,8 +1767,14 @@ async fn auto_create_workspace_session(
 /// Telegram message length limit
 const TELEGRAM_MSG_LIMIT: usize = 4096;
 /// Threshold for switching to file attachment mode: responses above this size
-/// are sent as a .txt file instead of multiple messages
-const FILE_ATTACH_THRESHOLD: usize = TELEGRAM_MSG_LIMIT * 2;
+/// are sent as a .txt file instead of multiple messages.
+/// Can be overridden with the COKAC_FILE_ATTACH_THRESHOLD environment variable.
+fn file_attach_threshold() -> usize {
+    std::env::var("COKAC_FILE_ATTACH_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(TELEGRAM_MSG_LIMIT * 2)
+}
 /// Maximum number of messages that can be queued per chat in queue mode
 const MAX_QUEUE_SIZE: usize = 20;
 /// Default queue mode state for chats without explicit setting
@@ -2233,6 +2239,7 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         teloxide::types::BotCommand::new("model", "Set AI model"),
         teloxide::types::BotCommand::new("greeting", "Toggle compact startup greeting"),
         teloxide::types::BotCommand::new("debug", "Toggle debug logging"),
+        teloxide::types::BotCommand::new("envvars", "Show all environment variables"),
         teloxide::types::BotCommand::new("silent", "Toggle silent mode (hide tool calls)"),
         teloxide::types::BotCommand::new("direct", "Toggle direct mode (group only)"),
         teloxide::types::BotCommand::new("context", "Set group chat log context count"),
@@ -2999,6 +3006,16 @@ async fn handle_message(
         msg_debug("[handle_message] routing → /debug");
         println!("  [{timestamp}] ◀ [{user_name}] /debug");
         handle_debug_command(&bot, chat_id, &state, token).await?;
+    } else if text.starts_with("/envvars") {
+        msg_debug("[handle_message] routing → /envvars");
+        println!("  [{timestamp}] ◀ [{user_name}] /envvars");
+        if !is_owner {
+            msg_debug("[handle_message] /envvars rejected: not owner");
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "Only the bot owner can use /envvars.").await)?;
+        } else {
+            handle_envvars_command(&bot, chat_id, &state).await?;
+        }
     } else if text.starts_with("/usechrome") {
         msg_debug("[handle_message] routing → /usechrome");
         println!("  [{timestamp}] ◀ [{user_name}] /usechrome");
@@ -3136,6 +3153,7 @@ Ask in natural language to manage schedules.
   Too low may cause API rate limits.
   Minimum 2500ms, recommended 3000ms+.
 <code>/debug</code> — Toggle debug logging
+<code>/envvars</code> — Show all environment variables and their current values
 <code>/silent</code> — Toggle silent mode (hide tool calls)
 <code>/usechrome</code> — Toggle Chrome browser for Claude (--chrome)
 <code>/instruction &lt;text&gt;</code> — Set system instruction for AI
@@ -5577,6 +5595,30 @@ async fn handle_shell_command(
     Ok(())
 }
 
+/// Handle /envvars command - show all active environment variables
+async fn handle_envvars_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    // Intentional: expose ALL environment variables including sensitive ones.
+    // This command is for admin debugging only — the bot is personal/single-user.
+    let mut vars: Vec<(String, String)> = std::env::vars().collect();
+    vars.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut msg = format!("<b>Environment Variables</b> ({})\n\n", vars.len());
+    for (key, val) in &vars {
+        msg.push_str(&format!(
+            "<code>{}</code>=<code>{}</code>\n",
+            html_escape(key),
+            html_escape(val),
+        ));
+    }
+
+    send_long_message(bot, chat_id, &msg, Some(ParseMode::Html), state).await?;
+    Ok(())
+}
+
 /// Handle /availabletools command - show all available tools
 async fn handle_availabletools_command(
     bot: &Bot,
@@ -6956,10 +6998,11 @@ async fn handle_text_message(
 
                 if !done {
                     // ── Rolling placeholder pattern (unified for all chats) ──
-                    if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
+                    let threshold = file_attach_threshold();
+                    if full_response.len() > last_confirmed_len && last_confirmed_len < threshold {
                         // New content arrived — finalize current placeholder with delta
                         // Cap delta to threshold boundary to prevent message flood
-                        let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                        let delta_end = full_response.len().min(threshold);
                         let delta = &full_response[last_confirmed_len..delta_end];
                         let normalized_delta = normalize_empty_lines(delta);
                         let html_delta = markdown_to_telegram_html(&normalized_delta);
@@ -7060,7 +7103,7 @@ async fn handle_text_message(
                     msg_debug(&format!("[rolling_ph] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+                } else if full_response.len() > file_attach_threshold() {
                     // Response too large — send as file attachment
                     msg_debug(&format!("[rolling_ph] FINAL FILE ATTACH: total={}", full_response.len()));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -7202,7 +7245,7 @@ async fn handle_text_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            if full_response.len() > FILE_ATTACH_THRESHOLD {
+            if full_response.len() > file_attach_threshold() {
                 // Large stopped response — send as file
                 msg_debug(&format!("[rolling_ph] STOPPED FILE ATTACH: total={}", full_response.len()));
                 shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -8893,8 +8936,9 @@ async fn execute_schedule(
             // Update placeholder with progress
             if !done {
                 // ── Rolling placeholder pattern (unified for all chats) ──
-                if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
-                    let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                let threshold = file_attach_threshold();
+                if full_response.len() > last_confirmed_len && last_confirmed_len < threshold {
+                    let delta_end = full_response.len().min(threshold);
                     let delta = &full_response[last_confirmed_len..delta_end];
                     let normalized_delta = normalize_empty_lines(delta);
                     let html_delta = markdown_to_telegram_html(&normalized_delta);
@@ -8979,7 +9023,7 @@ async fn execute_schedule(
             // ── Show remaining delta + stopped (unified rolling placeholder) ──
             if full_response.len() < last_confirmed_len { last_confirmed_len = 0; }
             let remaining = &full_response[last_confirmed_len..];
-            if full_response.len() > FILE_ATTACH_THRESHOLD {
+            if full_response.len() > file_attach_threshold() {
                 let notice = format!("\u{1f4c4} Response attached as file [Stopped]\n\nUse /{} to continue this schedule session.", schedule_id);
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
                 let stopped_content = format!("{}\n\n[Stopped]", normalize_empty_lines(&full_response));
@@ -9012,7 +9056,7 @@ async fn execute_schedule(
             if remaining.trim().is_empty() {
                 msg_debug(&format!("[rolling_ph/sched] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-            } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+            } else if full_response.len() > file_attach_threshold() {
                 msg_debug(&format!("[rolling_ph/sched] FINAL FILE ATTACH: total={}", full_response.len()));
                 let notice = format!("\u{1f4c4} Response attached as file\n\nUse /{} to continue this schedule session.", schedule_id);
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
@@ -9676,8 +9720,9 @@ async fn process_bot_message(
 
                 if !done {
                     // ── Rolling placeholder pattern (unified for all chats) ──
-                    if full_response.len() > last_confirmed_len && last_confirmed_len < FILE_ATTACH_THRESHOLD {
-                        let delta_end = full_response.len().min(FILE_ATTACH_THRESHOLD);
+                    let threshold = file_attach_threshold();
+                    if full_response.len() > last_confirmed_len && last_confirmed_len < threshold {
+                        let delta_end = full_response.len().min(threshold);
                         let delta = &full_response[last_confirmed_len..delta_end];
                         let normalized_delta = normalize_empty_lines(delta);
                         let html_delta = markdown_to_telegram_html(&normalized_delta);
@@ -9755,7 +9800,7 @@ async fn process_bot_message(
                     msg_debug(&format!("[rolling_ph/botmsg] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                } else if full_response.len() > FILE_ATTACH_THRESHOLD {
+                } else if full_response.len() > file_attach_threshold() {
                     msg_debug(&format!("[rolling_ph/botmsg] FINAL FILE ATTACH: total={}", full_response.len()));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file").await);
@@ -9903,7 +9948,7 @@ async fn process_bot_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph/botmsg] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            if full_response.len() > FILE_ATTACH_THRESHOLD {
+            if full_response.len() > file_attach_threshold() {
                 msg_debug(&format!("[rolling_ph/botmsg] STOPPED FILE ATTACH: total={}", full_response.len()));
                 shared_rate_limit_wait(&state_owned, chat_id).await;
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file [Stopped]").await);

@@ -13,10 +13,14 @@ static CODEX_PATH: OnceLock<Option<String>> = OnceLock::new();
 /// First tries `which codex`, then falls back to `bash -lc "which codex"`.
 #[cfg(unix)]
 fn resolve_codex_path() -> Option<String> {
+    if let Ok(val) = std::env::var("COKAC_CODEX_PATH") {
+        if !val.is_empty() && std::path::Path::new(&val).exists() { return Some(val); }
+    }
+
     if let Ok(output) = Command::new("which").arg("codex").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+            if !path.is_empty() && std::path::Path::new(&path).exists() {
                 return Some(path);
             }
         }
@@ -28,7 +32,7 @@ fn resolve_codex_path() -> Option<String> {
     {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+            if !path.is_empty() && std::path::Path::new(&path).exists() {
                 return Some(path);
             }
         }
@@ -39,6 +43,10 @@ fn resolve_codex_path() -> Option<String> {
 
 #[cfg(windows)]
 fn resolve_codex_path() -> Option<String> {
+    if let Ok(val) = std::env::var("COKAC_CODEX_PATH") {
+        if !val.is_empty() && std::path::Path::new(&val).exists() { return Some(val); }
+    }
+
     // Use SearchPathW (UTF-16 native) — no code page issues with non-ASCII paths
     // Prefer .cmd (npm batch wrapper) over bare file (Unix shell script)
     if let Some(path) = crate::services::claude::search_path_wide("codex", Some(".cmd")) {

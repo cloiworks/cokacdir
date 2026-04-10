@@ -44,7 +44,7 @@ fn check_opencode_available() -> bool {
     }
 
     if let Ok(val) = std::env::var("COKAC_OPENCODE_PATH") {
-        if !val.is_empty() {
+        if !val.is_empty() && std::path::Path::new(&val).exists() {
             opencode_debug(&format!("[check_opencode_available] found via COKAC_OPENCODE_PATH={}", val));
             return true;
         }
@@ -55,7 +55,7 @@ fn check_opencode_available() -> bool {
         if let Ok(output) = Command::new("which").arg("opencode").output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     opencode_debug(&format!("[check_opencode_available] found via which: {}", p));
                     return true;
                 }
@@ -64,7 +64,7 @@ fn check_opencode_available() -> bool {
         if let Ok(output) = Command::new("bash").args(["-lc", "which opencode"]).output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     opencode_debug(&format!("[check_opencode_available] found via bash -lc which: {}", p));
                     return true;
                 }
@@ -149,7 +149,7 @@ fn resolve_opencode_path() -> Option<String> {
     opencode_debug("[resolve_opencode_path] START");
 
     if let Ok(val) = std::env::var("COKAC_OPENCODE_PATH") {
-        if !val.is_empty() {
+        if !val.is_empty() && std::path::Path::new(&val).exists() {
             opencode_debug(&format!("[resolve_opencode_path] COKAC_OPENCODE_PATH={}", val));
             return Some(val);
         }
@@ -160,7 +160,7 @@ fn resolve_opencode_path() -> Option<String> {
         if let Ok(output) = Command::new("which").arg("opencode").output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     opencode_debug(&format!("[resolve_opencode_path] which → {}", p));
                     return Some(p);
                 }
@@ -169,7 +169,7 @@ fn resolve_opencode_path() -> Option<String> {
         if let Ok(output) = Command::new("bash").args(["-lc", "which opencode"]).output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     opencode_debug(&format!("[resolve_opencode_path] bash -lc which → {}", p));
                     return Some(p);
                 }
@@ -183,7 +183,7 @@ fn resolve_opencode_path() -> Option<String> {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).lines().next()
                     .unwrap_or("").to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     opencode_debug(&format!("[resolve_opencode_path] where → {}", p));
                     return Some(p);
                 }

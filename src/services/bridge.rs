@@ -118,7 +118,7 @@ fn parse_bridge_args(args: &[String]) -> BridgeArgs {
 
 fn resolve_gemini_path() -> Option<String> {
     if let Ok(val) = std::env::var("COKAC_GEMINI_PATH") {
-        if !val.is_empty() { return Some(val); }
+        if !val.is_empty() && std::path::Path::new(&val).exists() { return Some(val); }
     }
 
     #[cfg(unix)]
@@ -126,13 +126,13 @@ fn resolve_gemini_path() -> Option<String> {
         if let Ok(output) = Command::new("which").arg("gemini").output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() { return Some(p); }
+                if !p.is_empty() && std::path::Path::new(&p).exists() { return Some(p); }
             }
         }
         if let Ok(output) = Command::new("bash").args(["-lc", "which gemini"]).output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() { return Some(p); }
+                if !p.is_empty() && std::path::Path::new(&p).exists() { return Some(p); }
             }
         }
     }

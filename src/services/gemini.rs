@@ -37,7 +37,7 @@ fn check_gemini_available() -> bool {
     gemini_debug("[check_gemini_available] START");
 
     if let Ok(val) = std::env::var("COKAC_GEMINI_PATH") {
-        if !val.is_empty() {
+        if !val.is_empty() && std::path::Path::new(&val).exists() {
             gemini_debug(&format!("[check_gemini_available] found via COKAC_GEMINI_PATH={}", val));
             return true;
         }
@@ -48,7 +48,7 @@ fn check_gemini_available() -> bool {
         if let Ok(output) = Command::new("which").arg("gemini").output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     gemini_debug(&format!("[check_gemini_available] found via which: {}", p));
                     return true;
                 }
@@ -57,7 +57,7 @@ fn check_gemini_available() -> bool {
         if let Ok(output) = Command::new("bash").args(["-lc", "which gemini"]).output() {
             if output.status.success() {
                 let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !p.is_empty() {
+                if !p.is_empty() && std::path::Path::new(&p).exists() {
                     gemini_debug(&format!("[check_gemini_available] found via bash -lc which: {}", p));
                     return true;
                 }

@@ -848,9 +848,41 @@ fn deploy_docs() {
     }
 }
 
+/// Load ~/.cokacdir/.env.json and set environment variables.
+/// Values from this file take priority over the existing environment.
+fn load_dot_env() {
+    let env_path = match dirs::home_dir() {
+        Some(h) => h.join(".cokacdir").join(".env.json"),
+        None => return,
+    };
+    let content = match std::fs::read_to_string(&env_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let map: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Warning: failed to parse ~/.cokacdir/.env.json: {}", e);
+            return;
+        }
+    };
+    for (key, val) in &map {
+        if let Some(s) = val.as_str() {
+            std::env::set_var(key, s);
+        } else if val.is_number() || val.is_boolean() {
+            std::env::set_var(key, val.to_string());
+        } else {
+            eprintln!("Warning: ~/.cokacdir/.env.json: skipping '{}' (unsupported value type)", key);
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
     // Resolve binary path at startup (works on Linux, macOS, Windows)
     init_bin_path();
+
+    // Load ~/.cokacdir/.env.json — overrides existing environment variables
+    load_dot_env();
 
     // Initialize debug flag from environment variable
     claude::init_debug_from_env();

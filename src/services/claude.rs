@@ -50,11 +50,15 @@ static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
 /// (for non-interactive SSH sessions where ~/.profile isn't loaded).
 #[cfg(unix)]
 fn resolve_claude_path() -> Option<String> {
+    if let Ok(val) = std::env::var("COKAC_CLAUDE_PATH") {
+        if !val.is_empty() && std::path::Path::new(&val).exists() { return Some(val); }
+    }
+
     // Try direct `which claude` first
     if let Ok(output) = Command::new("which").arg("claude").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+            if !path.is_empty() && std::path::Path::new(&path).exists() {
                 return Some(path);
             }
         }
@@ -67,7 +71,7 @@ fn resolve_claude_path() -> Option<String> {
     {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
+            if !path.is_empty() && std::path::Path::new(&path).exists() {
                 return Some(path);
             }
         }
@@ -182,6 +186,10 @@ pub fn search_path_wide(name: &str, ext: Option<&str>) -> Option<String> {
 
 #[cfg(windows)]
 fn resolve_claude_path() -> Option<String> {
+    if let Ok(val) = std::env::var("COKAC_CLAUDE_PATH") {
+        if !val.is_empty() && std::path::Path::new(&val).exists() { return Some(val); }
+    }
+
     // Use SearchPathW (UTF-16 native) — no code page issues with non-ASCII paths
     if let Some(path) = search_path_wide("claude", Some(".exe")) {
         return Some(path);

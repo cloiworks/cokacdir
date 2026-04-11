@@ -2183,8 +2183,11 @@ async fn consume_sse_chunks(
     // one or more "data: <payload>" lines carry the JSON blob.
     let mut buf: Vec<u8> = Vec::with_capacity(8192);
     let mut init_sent = false;
-    // Track how much of each text part has already been flushed to the UI,
-    // so we can emit incremental "replace" updates as delta events arrive.
+    // Mirror the current full text of each in-progress text part. Used for
+    // two things: (a) computing the suffix to emit when `message.part.updated`
+    // ships a full snapshot, and (b) deduping across the two event paths
+    // (`message.part.delta` and `message.part.updated`) so the same content is
+    // never sent twice. StreamMessage::Text carries deltas, not snapshots.
     let mut part_progress: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     // Track the role of each known messageID so we can drop text parts that
@@ -2377,14 +2380,23 @@ async fn handle_sse_event(
                         .map(|v| !v.is_null())
                         .unwrap_or(false);
                     let previously = part_progress.get(&part_id).cloned().unwrap_or_default();
-                    // Emit a Text update only when the content actually grew
-                    // or changed and is non-empty. Matches legacy semantics
-                    // where each Text replaces the streaming buffer.
+                    // opencode's SSE ships full snapshots of the in-progress
+                    // text part, but downstream consumers (telegram.rs) treat
+                    // StreamMessage::Text as append-only deltas — matching the
+                    // claude/codex/gemini adapters. Emit only the newly
+                    // appended suffix so snapshots don't double-accumulate.
                     if !text.is_empty() && text != previously {
+                        let delta = if text.starts_with(&previously) {
+                            text[previously.len()..].to_string()
+                        } else {
+                            text.to_string()
+                        };
                         part_progress.insert(part_id.clone(), text.to_string());
-                        let _ = sender.send(StreamMessage::Text {
-                            content: text.to_string(),
-                        });
+                        if !delta.is_empty() {
+                            let _ = sender.send(StreamMessage::Text {
+                                content: delta,
+                            });
+                        }
                     }
                     if has_end {
                         // Finalize this text part into the trailing-Done
@@ -2471,16 +2483,13 @@ async fn handle_sse_event(
             if delta.is_empty() {
                 return;
             }
-            let accumulated = {
+            {
                 let entry = part_progress.entry(part_id).or_insert_with(String::new);
                 entry.push_str(delta);
-                entry.clone()
-            };
-            if !accumulated.is_empty() {
-                let _ = sender.send(StreamMessage::Text {
-                    content: accumulated,
-                });
             }
+            let _ = sender.send(StreamMessage::Text {
+                content: delta.to_string(),
+            });
         }
 
         "session.error" => {

@@ -299,7 +299,7 @@ loop {
 1. **parent sid 필터**: 모든 이벤트는 `properties.sessionID == parent_sid` 일 때만 처리. child sub-session 이벤트는 전부 drop.
 2. **role 필터**: `message.updated` 에서 `info.role` 을 `message_roles: HashMap<messageID, role>` 에 기록. `message.part.updated` 와 `message.part.delta` 는 part 의 `messageID` 가 "user" 로 알려진 경우 drop. 원본 사용자 프롬프트와 **플러그인이 inject한 `<system-reminder>` notification 메시지**가 UI에 노출되지 않는다(= plumbing 숨김).
 3. **빈 text 가드**: text/delta 의 내용이 빈 문자열이면 StreamMessage::Text 를 보내지 않고, final_result 누적에도 `\n\n` 구분자를 넣지 않는다.
-4. **text 중복 회피**: part 별 `part_progress: HashMap<partID, String>` 로 현재까지 보낸 내용을 추적. 같은 내용이 재전송되면 skip.
+4. **text delta 송신 + 중복 회피**: `StreamMessage::Text` 는 append-only delta 계약(telegram.rs / claude / codex / gemini 어댑터와 동일)이다. `message.part.delta` 는 수신한 delta 그대로 방출한다. `message.part.updated` 는 파트의 전체 스냅샷이 오므로 `part_progress: HashMap<partID, String>` 에 저장된 이전 전체 내용과 비교하여 새로 추가된 접미사(suffix)만 방출한다. `part_progress` 는 두 이벤트 경로 양쪽에서 파트의 현재 전체 내용을 미러링하여, (a) `message.part.updated` 의 delta 추출 기준선과 (b) 두 경로 간 dedup(`text == previously` 일 때 skip) 역할을 동시에 한다.
 5. **final_result 누적**: `time.end` 가 설정된 text part 가 도착하면 `Arc<Mutex<String>>` 에 append (중간에 `\n\n` 구분자). 완료 시점에 Done.result 로 실려 UI의 `finalize_streaming_history` 가 최종 Assistant 히스토리 아이템을 확정짓게 한다.
 6. **tool_use → ToolUse + ToolResult**: tool part 가 `completed` 또는 `error` 상태일 때만 방출. 기존 `normalize_tool_name` / `normalize_opencode_params` 헬퍼를 재사용.
 7. **session.error tentative**: 한 번 에러 이벤트가 오더라도 그 자리에서 실패 확정짓지 않고 debug 로그만 남긴다. 최종 성공/실패는 `poll_until_complete` 가 HTTP API로 본 최종 상태 기준으로 판단.

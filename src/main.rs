@@ -798,6 +798,341 @@ fn handle_prompt(prompt: &str) {
     }
 }
 
+/// Internal smoke test: drive `opencode::execute_command_streaming` with a
+/// single prompt, print every `StreamMessage` to stdout, and assert a minimum
+/// set of expected events. Used for post-build verification of the new SSE
+/// adapter (and the legacy path when `COKACDIR_OPENCODE_LEGACY=1`).
+///
+/// Usage: `cokacdir --test-opencode-sse "<prompt>" [--model provider/model]
+///                                                 [--session <sid>]
+///                                                 [--dir <path>]`
+///
+/// Exit code: 0 on PASS, 1 on FAIL, 2 on usage error.
+fn test_opencode_sse(prompt: &str, extra: &[String]) -> i32 {
+    use crate::services::claude::StreamMessage;
+    use std::sync::mpsc;
+
+    // Parse optional flags after the prompt
+    let mut model: Option<String> = None;
+    let mut session_id: Option<String> = None;
+    let mut working_dir: Option<String> = None;
+    let mut inject_agent: Option<String> = None;
+    let mut expect_error = false;
+    let mut cancel_after_ms: Option<u64> = None;
+    let mut expect_cancelled = false;
+    let mut i = 0;
+    while i < extra.len() {
+        match extra[i].as_str() {
+            "--model" => {
+                if i + 1 < extra.len() {
+                    model = Some(extra[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("[TEST] --model requires a value");
+                    return 2;
+                }
+            }
+            "--session" => {
+                if i + 1 < extra.len() {
+                    session_id = Some(extra[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("[TEST] --session requires a value");
+                    return 2;
+                }
+            }
+            "--dir" => {
+                if i + 1 < extra.len() {
+                    working_dir = Some(extra[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("[TEST] --dir requires a value");
+                    return 2;
+                }
+            }
+            "--agent" => {
+                if i + 1 < extra.len() {
+                    inject_agent = Some(extra[i + 1].clone());
+                    i += 2;
+                } else {
+                    eprintln!("[TEST] --agent requires a value");
+                    return 2;
+                }
+            }
+            "--expect-error" => {
+                expect_error = true;
+                i += 1;
+            }
+            "--cancel-after" => {
+                if i + 1 < extra.len() {
+                    match extra[i + 1].parse::<u64>() {
+                        Ok(ms) => cancel_after_ms = Some(ms),
+                        Err(e) => {
+                            eprintln!("[TEST] --cancel-after parse error: {}", e);
+                            return 2;
+                        }
+                    }
+                    i += 2;
+                } else {
+                    eprintln!("[TEST] --cancel-after requires a value (milliseconds)");
+                    return 2;
+                }
+            }
+            "--expect-cancelled" => {
+                expect_cancelled = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("[TEST] unknown arg: {}", other);
+                return 2;
+            }
+        }
+    }
+    // Stash the agent override in an env var that the test harness can read
+    // at the HTTP layer. The public execute_command_streaming signature has
+    // no agent parameter, so this is the least invasive way to inject an
+    // agent for plugin-based smoke tests.
+    if let Some(agent) = inject_agent.as_ref() {
+        std::env::set_var("COKACDIR_OPENCODE_TEST_AGENT", agent);
+    } else {
+        std::env::remove_var("COKACDIR_OPENCODE_TEST_AGENT");
+    }
+
+    let wd = working_dir.unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string())
+    });
+    println!(
+        "[TEST] start prompt_len={} model={:?} session={:?} dir={} legacy={}",
+        prompt.len(),
+        model,
+        session_id,
+        wd,
+        std::env::var("COKACDIR_OPENCODE_LEGACY").unwrap_or_default()
+    );
+
+    // Turn on opencode debug log sink so ~/.cokacdir/debug/opencode.log captures details.
+    crate::services::claude::DEBUG_ENABLED
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[TEST] failed to build tokio runtime: {}", e);
+            return 1;
+        }
+    };
+
+    let prompt_owned = prompt.to_string();
+    let wd_owned = wd.clone();
+    let session_owned = session_id.clone();
+    let model_owned = model.clone();
+
+    // If caller asked for cancel, create a real CancelToken so we can flip
+    // the `cancelled` atomic from a timer task. Otherwise pass None so the
+    // adapter runs to completion.
+    let cancel_token_outer: Option<std::sync::Arc<crate::services::claude::CancelToken>> =
+        if cancel_after_ms.is_some() {
+            Some(std::sync::Arc::new(crate::services::claude::CancelToken::new()))
+        } else {
+            None
+        };
+
+    let summary = rt.block_on(async move {
+        let (tx, rx) = mpsc::channel();
+        let prompt = prompt_owned.clone();
+        let wd = wd_owned.clone();
+        let session = session_owned.clone();
+        let model = model_owned.clone();
+        let cancel_token = cancel_token_outer.clone();
+
+        // If --cancel-after is set, spawn a timer task that flips the
+        // cancel flag after the requested delay. This simulates a user
+        // clicking "cancel" mid-turn in the bot UI.
+        if let Some(ms) = cancel_after_ms {
+            if let Some(token_for_timer) = cancel_token.clone() {
+                tokio::task::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                    println!("[TEST] firing cancel at {}ms", ms);
+                    token_for_timer
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                });
+            }
+        }
+
+        // Spawn the actual call on the blocking pool — this matches how
+        // telegram.rs invokes the adapter at runtime, so Handle::try_current
+        // inside execute_command_streaming sees this runtime.
+        let call_cancel = cancel_token.clone();
+        let call = tokio::task::spawn_blocking(move || {
+            opencode::execute_command_streaming(
+                &prompt,
+                session.as_deref(),
+                &wd,
+                tx,
+                None,
+                None,
+                call_cancel,
+                model.as_deref(),
+                false,
+            )
+        });
+
+        // Drain the message channel on a separate blocking task so the call
+        // and the consumer make progress in parallel (the send side is sync
+        // mpsc, so the drain must be sync too).
+        let drain = tokio::task::spawn_blocking(move || -> TestSummary {
+            let mut s = TestSummary::default();
+            while let Ok(msg) = rx.recv() {
+                s.total += 1;
+                match msg {
+                    StreamMessage::Init { session_id } => {
+                        s.init += 1;
+                        s.last_session_id = Some(session_id.clone());
+                        println!("[TEST] Init session_id={}", session_id);
+                    }
+                    StreamMessage::Text { content } => {
+                        s.text += 1;
+                        let preview: String = content.chars().take(160).collect();
+                        println!("[TEST] Text ({}B): {:?}", content.len(), preview);
+                    }
+                    StreamMessage::ToolUse { name, input } => {
+                        s.tool_use += 1;
+                        let preview: String = input.chars().take(120).collect();
+                        println!(
+                            "[TEST] ToolUse name={} input({}B)={:?}",
+                            name,
+                            input.len(),
+                            preview
+                        );
+                    }
+                    StreamMessage::ToolResult { content, is_error } => {
+                        s.tool_result += 1;
+                        let preview: String = content.chars().take(120).collect();
+                        println!(
+                            "[TEST] ToolResult is_error={} ({}B)={:?}",
+                            is_error,
+                            content.len(),
+                            preview
+                        );
+                    }
+                    StreamMessage::TaskNotification {
+                        task_id,
+                        status,
+                        summary,
+                    } => {
+                        s.task_notif += 1;
+                        println!(
+                            "[TEST] TaskNotification task_id={} status={} summary={}",
+                            task_id, status, summary
+                        );
+                    }
+                    StreamMessage::Done { result, session_id } => {
+                        s.done += 1;
+                        s.last_session_id = session_id.clone();
+                        s.done_result_len = result.len();
+                        let preview: String = result.chars().take(240).collect();
+                        println!(
+                            "[TEST] Done session_id={:?} result({}B)={:?}",
+                            session_id,
+                            result.len(),
+                            preview
+                        );
+                    }
+                    StreamMessage::Error {
+                        message,
+                        stdout,
+                        stderr,
+                        exit_code,
+                    } => {
+                        s.error += 1;
+                        s.last_error = Some(message.clone());
+                        println!(
+                            "[TEST] Error exit_code={:?} stdout_len={} stderr_len={} message={}",
+                            exit_code,
+                            stdout.len(),
+                            stderr.len(),
+                            message
+                        );
+                    }
+                }
+            }
+            s
+        });
+
+        let call_res = call.await;
+        let summary = drain.await.unwrap_or_default();
+        println!(
+            "[TEST] call_result={:?}",
+            call_res.as_ref().map(|r| match r {
+                Ok(()) => "ok".to_string(),
+                Err(e) => format!("err:{}", e),
+            })
+        );
+        summary
+    });
+
+    println!(
+        "[TEST] summary total={} init={} text={} tool_use={} tool_result={} task_notif={} done={} error={} done_result_len={} last_session={:?} last_error={:?}",
+        summary.total,
+        summary.init,
+        summary.text,
+        summary.tool_use,
+        summary.tool_result,
+        summary.task_notif,
+        summary.done,
+        summary.error,
+        summary.done_result_len,
+        summary.last_session_id,
+        summary.last_error
+    );
+
+    let pass = if expect_cancelled {
+        // Cancel path: the SSE adapter deliberately emits neither Done nor
+        // Error on clean cancel (legacy parity). Init should have landed
+        // before the cancel signal was honoured.
+        summary.init >= 1 && summary.done == 0 && summary.error == 0
+    } else if expect_error {
+        // Caller said an error is the expected outcome (e.g. bogus model).
+        summary.init >= 1 && summary.error >= 1 && summary.done == 0
+    } else {
+        summary.init >= 1 && summary.done >= 1 && summary.error == 0
+    };
+    if pass {
+        println!(
+            "[TEST] RESULT: PASS (expect_error={} expect_cancelled={})",
+            expect_error, expect_cancelled
+        );
+        0
+    } else {
+        println!(
+            "[TEST] RESULT: FAIL (expect_error={} expect_cancelled={})",
+            expect_error, expect_cancelled
+        );
+        1
+    }
+}
+
+#[derive(Default, Debug)]
+struct TestSummary {
+    total: u32,
+    init: u32,
+    text: u32,
+    tool_use: u32,
+    tool_result: u32,
+    task_notif: u32,
+    done: u32,
+    error: u32,
+    last_session_id: Option<String>,
+    last_error: Option<String>,
+    done_result_len: usize,
+}
+
 /// Normalize consecutive empty lines to maximum of one
 fn normalize_consecutive_empty_lines(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
@@ -935,6 +1270,19 @@ fn main() -> io::Result<()> {
                 }
                 handle_prompt(&args[i + 1]);
                 return Ok(());
+            }
+            "--test-opencode-sse" => {
+                // Internal smoke test for the opencode SSE adapter. Drives
+                // execute_command_streaming directly and prints every
+                // StreamMessage to stdout in a debuggable form.
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --test-opencode-sse requires a prompt argument");
+                    std::process::exit(2);
+                }
+                let prompt = args[i + 1].clone();
+                let extra: Vec<String> = args[i + 2..].to_vec();
+                let code = test_opencode_sse(&prompt, &extra);
+                std::process::exit(code);
             }
             "--base64" => {
                 if i + 1 >= args.len() {

@@ -298,12 +298,13 @@ loop {
 
 1. **parent sid 필터**: 모든 이벤트는 `properties.sessionID == parent_sid` 일 때만 처리. child sub-session 이벤트는 전부 drop.
 2. **role 필터**: `message.updated` 에서 `info.role` 을 `message_roles: HashMap<messageID, role>` 에 기록. `message.part.updated` 와 `message.part.delta` 는 part 의 `messageID` 가 "user" 로 알려진 경우 drop. 원본 사용자 프롬프트와 **플러그인이 inject한 `<system-reminder>` notification 메시지**가 UI에 노출되지 않는다(= plumbing 숨김).
-3. **빈 text 가드**: text/delta 의 내용이 빈 문자열이면 StreamMessage::Text 를 보내지 않고, final_result 누적에도 `\n\n` 구분자를 넣지 않는다.
-4. **text delta 송신 + 중복 회피**: `StreamMessage::Text` 는 append-only delta 계약(telegram.rs / claude / codex / gemini 어댑터와 동일)이다. `message.part.delta` 는 수신한 delta 그대로 방출한다. `message.part.updated` 는 파트의 전체 스냅샷이 오므로 `part_progress: HashMap<partID, String>` 에 저장된 이전 전체 내용과 비교하여 새로 추가된 접미사(suffix)만 방출한다. `part_progress` 는 두 이벤트 경로 양쪽에서 파트의 현재 전체 내용을 미러링하여, (a) `message.part.updated` 의 delta 추출 기준선과 (b) 두 경로 간 dedup(`text == previously` 일 때 skip) 역할을 동시에 한다.
-5. **final_result 누적**: `time.end` 가 설정된 text part 가 도착하면 `Arc<Mutex<String>>` 에 append (중간에 `\n\n` 구분자). 완료 시점에 Done.result 로 실려 UI의 `finalize_streaming_history` 가 최종 Assistant 히스토리 아이템을 확정짓게 한다.
-6. **tool_use → ToolUse + ToolResult**: tool part 가 `completed` 또는 `error` 상태일 때만 방출. 기존 `normalize_tool_name` / `normalize_opencode_params` 헬퍼를 재사용.
-7. **session.error tentative**: 한 번 에러 이벤트가 오더라도 그 자리에서 실패 확정짓지 않고 debug 로그만 남긴다. 최종 성공/실패는 `poll_until_complete` 가 HTTP API로 본 최종 상태 기준으로 판단.
-8. **명시적 무시 리스트**: `server.connected`, `server.heartbeat`, `session.diff`, `session.updated`, `session.status`, `session.created`, `tui.toast.show` 는 UI 노출 없이 그냥 흘려보낸다(로그 스팸 방지).
+3. **파트 타입 화이트리스트**: `message.part.updated` 에서 `part.type` 을 `part_types: HashMap<partID, type>` 에 기록. `message.part.delta` 는 `part_types[partID] == "text"` 인 경우에만 통과시키고 나머지(reasoning 등)는 drop. 블랙리스트가 아닌 화이트리스트 방식으로, 향후 알 수 없는 새 파트 타입이 추가되어도 기본 차단된다. 3개 모델(gpt-5.1-codex-mini, gpt-5.4, big-pickle) 실측으로 delta를 발생시키는 파트 타입이 `text`와 `reasoning` 뿐임을 확인한 뒤 결정. 섹션 13 참조.
+4. **빈 text 가드**: text/delta 의 내용이 빈 문자열이면 StreamMessage::Text 를 보내지 않고, final_result 누적에도 `\n\n` 구분자를 넣지 않는다.
+5. **text delta 송신 + 중복 회피**: `StreamMessage::Text` 는 append-only delta 계약(telegram.rs / claude / codex / gemini 어댑터와 동일)이다. `message.part.delta` 는 수신한 delta 그대로 방출한다. `message.part.updated` 는 파트의 전체 스냅샷이 오므로 `part_progress: HashMap<partID, String>` 에 저장된 이전 전체 내용과 비교하여 새로 추가된 접미사(suffix)만 방출한다. `part_progress` 는 두 이벤트 경로 양쪽에서 파트의 현재 전체 내용을 미러링하여, (a) `message.part.updated` 의 delta 추출 기준선과 (b) 두 경로 간 dedup(`text == previously` 일 때 skip) 역할을 동시에 한다.
+6. **final_result 누적**: `time.end` 가 설정된 text part 가 도착하면 `Arc<Mutex<String>>` 에 append (중간에 `\n\n` 구분자). 완료 시점에 Done.result 로 실려 UI의 `finalize_streaming_history` 가 최종 Assistant 히스토리 아이템을 확정짓게 한다.
+7. **tool_use → ToolUse + ToolResult**: tool part 가 `completed` 또는 `error` 상태일 때만 방출. 기존 `normalize_tool_name` / `normalize_opencode_params` 헬퍼를 재사용.
+8. **session.error tentative**: 한 번 에러 이벤트가 오더라도 그 자리에서 실패 확정짓지 않고 debug 로그만 남긴다. 최종 성공/실패는 `poll_until_complete` 가 HTTP API로 본 최종 상태 기준으로 판단.
+9. **명시적 무시 리스트**: `server.connected`, `server.heartbeat`, `session.diff`, `session.updated`, `session.status`, `session.created`, `tui.toast.show` 는 UI 노출 없이 그냥 흘려보낸다(로그 스팸 방지).
 
 ### 5.7 완료 판정 — `poll_until_complete`
 
@@ -603,3 +604,111 @@ PASS=4 FAIL=0 leaked=0
 16. **2차 검증 중 버그 M 발견 및 수정**: 서버가 mid-turn 에 죽었을 때 `poll_until_complete` 가 HTTP 에러를 무한 재시도하며 30분 timeout 까지 소진하는 문제. `POLL_MAX_CONSECUTIVE_ERRORS = 6` 도입 + `consecutive_http_errors` 카운터 + `last_http_error` 슬롯 추가로 6회 연속 에러 시 즉시 `PollError::Fatal` 반환하도록 수정. 재검증 PASS.
 17. V1~V5 (2차 검증) 모두 PASS 확인, leaked 프로세스 0개 재확인.
 18. devdoc 2차 갱신 (지금 이 문서 — 섹션 5.3 상수 업데이트, 6b 버그 M 추가, 6d 2차 검증 섹션 신설, 9b 플래그 표 확장, 9d 재작성, 9e 잔여 미커버 분리, 시간선 15~18번 추가).
+19. **텔레그램 파일 첨부 비활성화**: opencode 응답이 `file_attach_threshold` (8192바이트)를 초과할 때 스트리밍 중 읽던 내용을 `📄 Response attached as file`로 덮어쓰고 전체 응답을 파일로 중복 전송하는 문제 확인. `should_attach_response_as_file(response_len, provider_str)` 헬퍼를 도입해 `provider_str == "opencode"`일 때 파일 첨부를 비활성화. `telegram.rs`의 6개 판정 지점(일반/스케줄/봇메시지 × 정상종료/Stopped) 모두 적용. 스트리밍 중 delta 커밋 경계로만 쓰이는 3개 `file_attach_threshold()` 호출은 변경 없이 유지.
+20. **reasoning delta 필터링**: opencode SSE 어댑터의 `handle_sse_event`에서 `message.part.delta` 핸들러가 파트 타입을 확인하지 않아 reasoning 파트의 플레인텍스트 delta가 `StreamMessage::Text`로 텔레그램까지 누출되는 구조적 결함 확인 및 수정. `part_types: HashMap<String, String>`을 도입해 `message.part.updated` 시점에 파트 타입을 기록하고, `message.part.delta`에서 화이트리스트(`part_type == "text"`인 delta만 통과) 적용.
+21. **reasoning 필터 검증**: 직접 `opencode serve --port 14096`을 띄우고 3개 모델(gpt-5.1-codex-mini, gpt-5.4, big-pickle)로 raw SSE 이벤트를 수집해 파트 타입별 delta 발생 여부를 실측. 이후 빌드된 바이너리(`./dist_beta/cokacdir-linux-aarch64 --test-opencode-sse`)로 gpt-5.4에서 reasoning이 차단되고 응답 텍스트만 전달됨을 확인. 상세는 섹션 13 참조.
+22. devdoc 3차 갱신 (섹션 13 신설, 시간선 19~22번 추가).
+
+---
+
+## 13. reasoning delta 필터링 및 파일 첨부 비활성화
+
+### 13.1 문제 1 — 텔레그램 파일 첨부 전환
+
+opencode를 통한 AI 응답이 `file_attach_threshold()` (기본 `TELEGRAM_MSG_LIMIT * 2 = 8192`바이트)를 초과하면 telegram.rs가 스트리밍 중 placeholder를 `📄 Response attached as file`로 덮어쓰고 전체 응답을 `.txt` 파일로 첨부한다.
+
+rolling placeholder 구조에서 이 전환이 일어나면 사용자는 다음을 경험한다:
+
+1. 이미 확정된 메시지들로 8000자 이상의 응답을 읽고 있다
+2. placeholder의 마지막 수백 자가 갑자기 `📄 Response attached as file`로 교체된다
+3. 첨부 파일에는 이미 읽은 8000자 + 나머지가 전부 들어있다
+
+opencode는 reasoning 모델 + tool 호출 등으로 응답 길이가 쉽게 임계값을 넘기므로 이 전환이 빈번하게 발생할 수 있다.
+
+**수정**: `telegram.rs`에 `should_attach_response_as_file(response_len, provider_str)` 헬퍼를 추가. `provider_str == "opencode"`이면 무조건 `false`를 반환해 파일 첨부 분기를 타지 않는다. 임계값을 넘는 응답은 기존 `send_long_message` 경로로 분할 전송된다.
+
+변경 위치 (`src/services/telegram.rs`):
+
+| 줄 | 용도 |
+|---|---|
+| 1779 | `should_attach_response_as_file` 헬퍼 정의 |
+| 7113 | 일반 메시지 FINAL (정상 종료) |
+| 7255 | 일반 메시지 STOPPED |
+| 9034 | 스케줄 STOPPED |
+| 9067 | 스케줄 FINAL |
+| 9811 | 봇 메시지 FINAL |
+| 9959 | 봇 메시지 STOPPED |
+
+`execute_schedule`의 `tokio::spawn` 직전에 `let provider_str: &'static str = detect_provider(model.as_deref());`를 추가해 closure에 캡처되도록 했다. 일반 메시지와 봇 메시지 경로는 이미 `provider_str`이 scope에 있었다.
+
+스트리밍 중 delta 커밋 경계로 `file_attach_threshold()`를 사용하는 3개 지점(7008, 8947, 9731)은 파일 첨부 판정이 아니라 rolling placeholder의 확정 크기를 결정하는 용도이므로 변경하지 않았다.
+
+### 13.2 문제 2 — reasoning delta 누출
+
+SSE 어댑터의 `handle_sse_event` 에는 두 이벤트 경로가 있다:
+
+- `message.part.updated`: `part.type` 필드를 볼 수 있으므로 `"reasoning"`을 명시적으로 무시 (기존 코드, 2445줄)
+- `message.part.delta`: `props.field == "text"`만 확인하고 파트 타입 정보가 없음. reasoning 파트의 delta도 `field: "text"`이므로 필터를 통과해 `StreamMessage::Text`로 텔레그램까지 도달
+
+### 13.3 실측 — raw SSE 이벤트 수집
+
+직접 `opencode serve --port 14096`을 띄우고 3개 모델로 reasoning을 유발하는 프롬프트를 전송해 raw SSE 이벤트를 수집했다.
+
+**관측된 파트 타입과 delta 발생 여부**:
+
+| 파트 타입 | delta 발생 | 모델별 특이사항 |
+|---|---|---|
+| `text` | O (항상) | 어시스턴트 응답 텍스트. 전달 대상 |
+| `reasoning` | 모델에 따라 다름 | gpt-5.1-codex-mini: 암호화만(delta 0건). gpt-5.4: 플레인텍스트 delta 발생. big-pickle: 플레인텍스트 delta 발생 |
+| `tool` | X | `message.part.updated`에서 completed/error 상태일 때 별도 경로(ToolUse/ToolResult)로 처리 |
+| `step-start` | X | — |
+| `step-finish` | X | — |
+| `patch` | 미관측 | 기존 코드에서 무시 목록에 포함 |
+| `snapshot` | 미관측 | 기존 코드에서 무시 목록에 포함 |
+
+**모델별 reasoning 상세**:
+
+| 모델 | reasoning 전달 방식 | delta 건수 | 텍스트 크기 |
+|---|---|---|---|
+| `openai/gpt-5.1-codex-mini` | 서버측 암호화. `text=""`, `metadata.openai.reasoningEncryptedContent`에 블롭 | 0 | 0 |
+| `openai/gpt-5.4` | 암호화 + **플레인텍스트 delta 동시 발생**. `text` 필드에 357자 누적 | 69 | 357자 |
+| `opencode/big-pickle` | 플레인텍스트만. `text` 필드에 1454자 누적 | 14 | 1454자 |
+
+**핵심 발견**: 모든 delta의 `(part_type, field)` 조합은 `(text, text)`와 `(reasoning, text)` 두 가지뿐이었다. 전달해야 하는 것은 `(text, text)` 뿐이다. 이 데이터가 화이트리스트 방식을 지지한다.
+
+**이벤트 순서 확인**: 3개 모델 모두에서 `message.part.updated`(파트 타입 포함)가 해당 파트의 첫 `message.part.delta`보다 먼저 도착했다. `part_types` 맵이 delta 도착 시점에 항상 채워져 있음을 확인.
+
+### 13.4 수정 내용
+
+블랙리스트(`reasoning`만 차단)가 아닌 **화이트리스트(`text`만 허용)** 적용. 향후 알 수 없는 새 파트 타입이 추가되어도 기본적으로 차단된다.
+
+변경 위치 (`src/services/opencode.rs`):
+
+| 줄 | 내용 |
+|---|---|
+| 2197 | `part_types: HashMap<String, String>` 선언 (`consume_sse_chunks` 내부) |
+| 2263 | `handle_sse_event` 호출 시 `&mut part_types` 전달 |
+| 2310 | `handle_sse_event` 시그니처에 `part_types` 파라미터 추가 |
+| 2383 | `message.part.updated`에서 `part_types.insert(part_id, part_type)` |
+| 2423 | 텍스트 파트 종료(`has_end`) 시 `part_types.remove(&part_id)` |
+| 2500 | `message.part.delta`에서 `part_types.get(&part_id) != Some("text")`이면 `return` |
+
+`part_types` 맵은 `consume_sse_chunks` 로컬 변수이므로 턴 종료 시 자동 해제된다. reasoning 파트 엔트리는 명시적으로 제거하지 않지만 턴 단위 lifecycle이므로 누수 없음.
+
+### 13.5 빌드 검증
+
+`python3 build.py --linux-arm64`로 빌드 후 `--test-opencode-sse`로 gpt-5.4에 reasoning을 유발하는 프롬프트 전송:
+
+```
+$ ./dist_beta/cokacdir-linux-aarch64 --test-opencode-sse \
+  "Think step by step. Count the number of letter r in strawberry." \
+  --model openai/gpt-5.4 --dir /tmp
+```
+
+결과: Text 이벤트 18건, 전부 최종 응답 텍스트("Sisyphus here: there are 3 r's in \"strawberry.\"")의 delta 조각. reasoning 내용(수정 전 raw SSE에서 69개 delta, 357자로 관측)은 0건. `Done.result = 53바이트`.
+
+| 항목 | 수정 전 (raw SSE 프로브) | 수정 후 (빌드 바이너리) |
+|---|---|---|
+| Text 이벤트 수 | 87 (reasoning 69 + 응답 18) | 18 (응답만) |
+| reasoning 내용 | 357자 플레인텍스트 노출 | 0자 |
+| Done.result | reasoning + 응답 혼합 | 응답 53바이트만 |

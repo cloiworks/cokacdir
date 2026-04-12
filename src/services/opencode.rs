@@ -32,15 +32,10 @@ const POLL_REQUIRED_CONSECUTIVE: u32 = 2;
 /// an "all idle" reading. Protects against premature exits before the first
 /// message.part.updated arrives.
 const POLL_MIN_STABILIZATION: Duration = Duration::from_secs(1);
-/// Hard cap for a single assistant turn (including background tasks).
-/// Matches the upper bound we would be willing to wait synchronously.
-const POLL_OVERALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// HTTP request timeout for individual poll endpoints.
 const POLL_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum consecutive HTTP error iterations in poll_until_complete before we
-/// declare the turn dead. Covers the "opencode serve crashed mid-turn" case:
-/// without this cap, a dead server would keep us spinning for 30 minutes
-/// until POLL_OVERALL_TIMEOUT fires, and the bot user would see nothing.
+/// declare the turn dead. Covers the "opencode serve crashed mid-turn" case.
 /// 6 * 500ms = ~3s of grace before bailing out.
 const POLL_MAX_CONSECUTIVE_ERRORS: u32 = 6;
 
@@ -2190,6 +2185,12 @@ async fn consume_sse_chunks(
     // never sent twice. StreamMessage::Text carries deltas, not snapshots.
     let mut part_progress: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    // Track the type of each known partID so `message.part.delta` events
+    // (which carry only partID/field/delta and omit the part type) can
+    // filter out reasoning parts. Without this map, reasoning deltas slip
+    // through the text-field check and leak into the user-facing stream.
+    let mut part_types: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     // Track the role of each known messageID so we can drop text parts that
     // belong to user messages (including plugin-injected
     // `<system-reminder>` notifications).
@@ -2254,6 +2255,7 @@ async fn consume_sse_chunks(
                 &last_error,
                 &mut init_sent,
                 &mut part_progress,
+                &mut part_types,
                 &mut message_roles,
             )
             .await;
@@ -2300,6 +2302,7 @@ async fn handle_sse_event(
     last_error: &Arc<tokio::sync::Mutex<Option<String>>>,
     init_sent: &mut bool,
     part_progress: &mut std::collections::HashMap<String, String>,
+    part_types: &mut std::collections::HashMap<String, String>,
     message_roles: &mut std::collections::HashMap<String, String>,
 ) {
     let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -2371,6 +2374,9 @@ async fn handle_sse_event(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            if !part_id.is_empty() && !part_type.is_empty() {
+                part_types.insert(part_id.clone(), part_type.to_string());
+            }
             match part_type {
                 "text" => {
                     let text = part.get("text").and_then(|v| v.as_str()).unwrap_or("");
@@ -2409,6 +2415,7 @@ async fn handle_sse_event(
                             guard.push_str(text);
                         }
                         part_progress.remove(&part_id);
+                        part_types.remove(&part_id);
                     }
                 }
                 "tool" => {
@@ -2479,6 +2486,15 @@ async fn handle_sse_event(
             if part_id.is_empty() {
                 return;
             }
+            // Only forward deltas for "text" type parts. opencode streams
+            // a part's initial `message.part.updated` (carrying part.type)
+            // before any deltas, so by the time we see a delta the type is
+            // already known. Verified with gpt-5.4, gpt-5.1-codex-mini,
+            // and big-pickle: only "text" and "reasoning" parts emit deltas,
+            // and only "text" should reach the user.
+            if part_types.get(&part_id).map(String::as_str) != Some("text") {
+                return;
+            }
             let delta = props.get("delta").and_then(|v| v.as_str()).unwrap_or("");
             if delta.is_empty() {
                 return;
@@ -2544,9 +2560,7 @@ async fn poll_until_complete(
     let mut ever_busy = false;
     let mut iter = 0u32;
     // Track consecutive HTTP failures so we can fast-fail when the
-    // `opencode serve` child has crashed or become unreachable. Without
-    // this we would silently retry every 500 ms until POLL_OVERALL_TIMEOUT
-    // (30 min) fires, during which the bot user sees no response at all.
+    // `opencode serve` child has crashed or become unreachable.
     let mut consecutive_http_errors = 0u32;
     let mut last_http_error: Option<String> = None;
     loop {
@@ -2554,12 +2568,6 @@ async fn poll_until_complete(
         if serve_cancel_hit(cancel_token) {
             opencode_debug("[serve.poll] cancelled");
             return Err(PollError::Cancelled);
-        }
-        if start.elapsed() > POLL_OVERALL_TIMEOUT {
-            return Err(PollError::Fatal(format!(
-                "opencode turn exceeded {} minute ceiling",
-                POLL_OVERALL_TIMEOUT.as_secs() / 60
-            )));
         }
         tokio::time::sleep(POLL_INTERVAL).await;
 
@@ -2578,14 +2586,12 @@ async fn poll_until_complete(
                         .as_deref()
                         .unwrap_or("unknown HTTP error");
                     opencode_debug(&format!(
-                        "[serve.poll] {} consecutive HTTP errors → fatal: {}",
-                        consecutive_http_errors, detail
+                        "[serve.poll] POLL ABORT: {} consecutive HTTP errors on /session/status endpoint (elapsed={:.1}s, iter={}). last error: {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), iter, detail
                     ));
                     return Err(PollError::Fatal(format!(
-                        "opencode server unreachable after {} consecutive polls ({}s): {}",
-                        consecutive_http_errors,
-                        (consecutive_http_errors as u64) * POLL_INTERVAL.as_millis() as u64 / 1000,
-                        detail
+                        "opencode server unreachable: /session/status failed {} consecutive times ({:.1}s elapsed): {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), detail
                     )));
                 }
                 consecutive = 0;
@@ -2627,9 +2633,13 @@ async fn poll_until_complete(
                     let detail = last_http_error
                         .as_deref()
                         .unwrap_or("unknown HTTP error");
+                    opencode_debug(&format!(
+                        "[serve.poll] POLL ABORT: {} consecutive HTTP errors on /session/{{}}/children endpoint (elapsed={:.1}s, iter={}). last error: {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), iter, detail
+                    ));
                     return Err(PollError::Fatal(format!(
-                        "opencode server unreachable after {} consecutive polls: {}",
-                        consecutive_http_errors, detail
+                        "opencode server unreachable: /session/{{}}/children failed {} consecutive times ({:.1}s elapsed): {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), detail
                     )));
                 }
                 consecutive = 0;
@@ -2655,9 +2665,13 @@ async fn poll_until_complete(
                     let detail = last_http_error
                         .as_deref()
                         .unwrap_or("unknown HTTP error");
+                    opencode_debug(&format!(
+                        "[serve.poll] POLL ABORT: {} consecutive HTTP errors on /session/{{}}/todo endpoint (elapsed={:.1}s, iter={}). last error: {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), iter, detail
+                    ));
                     return Err(PollError::Fatal(format!(
-                        "opencode server unreachable after {} consecutive polls: {}",
-                        consecutive_http_errors, detail
+                        "opencode server unreachable: /session/{{}}/todo failed {} consecutive times ({:.1}s elapsed): {}",
+                        consecutive_http_errors, start.elapsed().as_secs_f64(), detail
                     )));
                 }
                 consecutive = 0;

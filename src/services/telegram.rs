@@ -1775,6 +1775,13 @@ fn file_attach_threshold() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(TELEGRAM_MSG_LIMIT * 2)
 }
+
+fn should_attach_response_as_file(response_len: usize, provider_str: &str) -> bool {
+    if provider_str == "opencode" {
+        return false;
+    }
+    response_len > file_attach_threshold()
+}
 /// Maximum number of messages that can be queued per chat in queue mode
 const MAX_QUEUE_SIZE: usize = 20;
 /// Default queue mode state for chats without explicit setting
@@ -7103,7 +7110,7 @@ async fn handle_text_message(
                     msg_debug(&format!("[rolling_ph] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                } else if full_response.len() > file_attach_threshold() {
+                } else if should_attach_response_as_file(full_response.len(), provider_str) {
                     // Response too large — send as file attachment
                     msg_debug(&format!("[rolling_ph] FINAL FILE ATTACH: total={}", full_response.len()));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -7245,7 +7252,7 @@ async fn handle_text_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            if full_response.len() > file_attach_threshold() {
+            if should_attach_response_as_file(full_response.len(), provider_str) {
                 // Large stopped response — send as file
                 msg_debug(&format!("[rolling_ph] STOPPED FILE ATTACH: total={}", full_response.len()));
                 shared_rate_limit_wait(&state_owned, chat_id).await;
@@ -8734,6 +8741,7 @@ async fn execute_schedule(
     let state_owned = state.clone();
     let entry_clone = entry.clone();
     let workspace_path_owned = workspace_path.clone();
+    let provider_str: &'static str = detect_provider(model.as_deref());
     tokio::spawn(async move {
         let _group_lock = group_lock; // hold group chat lock until task ends
         const SPINNER: &[&str] = &[
@@ -9023,7 +9031,7 @@ async fn execute_schedule(
             // ── Show remaining delta + stopped (unified rolling placeholder) ──
             if full_response.len() < last_confirmed_len || !full_response.is_char_boundary(last_confirmed_len) { last_confirmed_len = 0; }
             let remaining = &full_response[last_confirmed_len..];
-            if full_response.len() > file_attach_threshold() {
+            if should_attach_response_as_file(full_response.len(), provider_str) {
                 let notice = format!("\u{1f4c4} Response attached as file [Stopped]\n\nUse /{} to continue this schedule session.", schedule_id);
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
                 let stopped_content = format!("{}\n\n[Stopped]", normalize_empty_lines(&full_response));
@@ -9056,7 +9064,7 @@ async fn execute_schedule(
             if remaining.trim().is_empty() {
                 msg_debug(&format!("[rolling_ph/sched] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                 let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-            } else if full_response.len() > file_attach_threshold() {
+            } else if should_attach_response_as_file(full_response.len(), provider_str) {
                 msg_debug(&format!("[rolling_ph/sched] FINAL FILE ATTACH: total={}", full_response.len()));
                 let notice = format!("\u{1f4c4} Response attached as file\n\nUse /{} to continue this schedule session.", schedule_id);
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &notice).await);
@@ -9800,7 +9808,7 @@ async fn process_bot_message(
                     msg_debug(&format!("[rolling_ph/botmsg] FINAL DELETE placeholder: msg_id={}", placeholder_msg_id));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
-                } else if full_response.len() > file_attach_threshold() {
+                } else if should_attach_response_as_file(full_response.len(), provider_str) {
                     msg_debug(&format!("[rolling_ph/botmsg] FINAL FILE ATTACH: total={}", full_response.len()));
                     shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file").await);
@@ -9948,7 +9956,7 @@ async fn process_bot_message(
             let remaining = &full_response[last_confirmed_len..];
             msg_debug(&format!("[rolling_ph/botmsg] STOPPED: placeholder_msg_id={}, confirmed={}, remaining_len={}",
                 placeholder_msg_id, last_confirmed_len, remaining.trim().len()));
-            if full_response.len() > file_attach_threshold() {
+            if should_attach_response_as_file(full_response.len(), provider_str) {
                 msg_debug(&format!("[rolling_ph/botmsg] STOPPED FILE ATTACH: total={}", full_response.len()));
                 shared_rate_limit_wait(&state_owned, chat_id).await;
                 let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "\u{1f4c4} Response attached as file [Stopped]").await);

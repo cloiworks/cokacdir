@@ -97,8 +97,12 @@ pub fn is_gemini_model(model: Option<&str>) -> bool {
 
 /// Strip "gemini:" prefix and return the actual model name.
 /// Returns None if the input is just "gemini" (use default).
+/// Also strips display-name suffix (" — Description") that may have been
+/// stored when a user copy-pasted the full help line.
 pub fn strip_gemini_prefix(model: &str) -> Option<&str> {
-    let result = model.strip_prefix("gemini:").filter(|s| !s.is_empty());
+    let result = model.strip_prefix("gemini:")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(" \u{2014} ").next().unwrap_or(s).trim());
     gemini_debug(&format!("[strip_gemini_prefix] model={:?} result={:?}", model, result));
     result
 }

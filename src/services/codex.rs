@@ -75,8 +75,11 @@ pub fn is_codex_model(model: Option<&str>) -> bool {
 
 /// Strip "codex:" prefix and return the actual model name.
 /// Returns None if the input is just "codex" (use CLI default).
+/// Also strips display-name suffix (" — Description") if present.
 pub fn strip_codex_prefix(model: &str) -> Option<&str> {
-    model.strip_prefix("codex:").filter(|s| !s.is_empty())
+    model.strip_prefix("codex:")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(" \u{2014} ").next().unwrap_or(s).trim())
 }
 
 fn codex_debug_log(msg: &str) {

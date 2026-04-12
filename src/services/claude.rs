@@ -796,8 +796,11 @@ pub fn is_claude_model(model: Option<&str>) -> bool {
 
 /// Strip "claude:" prefix and return the actual model name.
 /// Returns None if the input is just "claude" (use CLI default).
+/// Also strips display-name suffix (" — Description") if present.
 pub fn strip_claude_prefix(model: &str) -> Option<&str> {
-    model.strip_prefix("claude:").filter(|s| !s.is_empty())
+    model.strip_prefix("claude:")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(" \u{2014} ").next().unwrap_or(s).trim())
 }
 
 /// Check if platform supports AI features

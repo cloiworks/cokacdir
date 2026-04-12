@@ -125,8 +125,11 @@ pub fn is_opencode_model(model: Option<&str>) -> bool {
 
 /// Strip "opencode:" prefix and return the actual model name.
 /// Returns None if the input is just "opencode" (use default).
+/// Also strips display-name suffix (" — Description") if present.
 pub fn strip_opencode_prefix(model: &str) -> Option<&str> {
-    let result = model.strip_prefix("opencode:").filter(|s| !s.is_empty());
+    let result = model.strip_prefix("opencode:")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(" \u{2014} ").next().unwrap_or(s).trim());
     opencode_debug(&format!("[strip_opencode_prefix] model={:?} result={:?}", model, result));
     result
 }

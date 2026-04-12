@@ -6196,27 +6196,30 @@ async fn handle_public_command(
 /// Resolve a model name with provider prefix.
 /// Returns Err(provider_name) if the provider binary is unavailable, or Err("") if the format is invalid.
 fn resolve_model_name(name: &str) -> Result<String, &'static str> {
-    if claude::is_claude_model(Some(name)) {
+    // Strip display-name suffix (" — Description") that users may copy-paste
+    // from the /model help text (e.g. "gemini:gemini-2.5-flash-lite — Gemini 2.5 Flash Lite").
+    let clean = name.split(" \u{2014} ").next().unwrap_or(name).trim();
+    if claude::is_claude_model(Some(clean)) {
         if claude::is_claude_available() {
-            Ok(name.to_string())
+            Ok(clean.to_string())
         } else {
             Err("claude")
         }
-    } else if codex::is_codex_model(Some(name)) {
+    } else if codex::is_codex_model(Some(clean)) {
         if codex::is_codex_available() {
-            Ok(name.to_string())
+            Ok(clean.to_string())
         } else {
             Err("codex")
         }
-    } else if gemini::is_gemini_model(Some(name)) {
+    } else if gemini::is_gemini_model(Some(clean)) {
         if gemini::is_gemini_available() {
-            Ok(name.to_string())
+            Ok(clean.to_string())
         } else {
             Err("gemini")
         }
-    } else if opencode::is_opencode_model(Some(name)) {
+    } else if opencode::is_opencode_model(Some(clean)) {
         if opencode::is_opencode_available() {
-            Ok(name.to_string())
+            Ok(clean.to_string())
         } else {
             Err("opencode")
         }

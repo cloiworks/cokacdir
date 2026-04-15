@@ -447,6 +447,8 @@ struct BotSettings {
     greeting: bool,
     /// chat_id (string) → true if --chrome flag should be passed to Claude CLI
     use_chrome: HashMap<String, bool>,
+    /// chat_id (string) → message to send when AI processing completes
+    end_hook: HashMap<String, String>,
 }
 
 impl Default for BotSettings {
@@ -467,6 +469,7 @@ impl Default for BotSettings {
             display_name: String::new(),
             greeting: false,
             use_chrome: HashMap::new(),
+            end_hook: HashMap::new(),
         }
     }
 }
@@ -1958,7 +1961,14 @@ fn load_bot_settings(token: &str) -> BotSettings {
             .collect())
         .unwrap_or_default();
 
-    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, queue, username, display_name, greeting, use_chrome }
+    let end_hook: HashMap<String, String> = entry.get("end_hook")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect())
+        .unwrap_or_default();
+
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, queue, username, display_name, greeting, use_chrome, end_hook }
 }
 
 /// Save bot settings to bot_settings.json
@@ -2001,6 +2011,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "display_name": settings.display_name,
         "greeting": settings.greeting,
         "use_chrome": settings.use_chrome,
+        "end_hook": settings.end_hook,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
@@ -2253,6 +2264,8 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         teloxide::types::BotCommand::new("query", "Send message to AI (/query@bot for groups)"),
         teloxide::types::BotCommand::new("instruction", "Set system instruction for this chat"),
         teloxide::types::BotCommand::new("instruction_clear", "Clear system instruction"),
+        teloxide::types::BotCommand::new("setendhook", "Set message to send when processing completes"),
+        teloxide::types::BotCommand::new("setendhook_clear", "Clear end hook message"),
     ];
     if let Err(e) = tg!("set_my_commands", bot.set_my_commands(commands).await) {
         println!("  ⚠ Failed to set bot commands: {e}");
@@ -3054,6 +3067,14 @@ async fn handle_message(
             println!("  [{timestamp}] ◀ [{user_name}] {body}");
             handle_text_message(&bot, chat_id, body, &state, &user_name, false).await?;
         }
+    } else if text.starts_with("/setendhook_clear") {
+        msg_debug("[handle_message] routing → /setendhook_clear");
+        println!("  [{timestamp}] ◀ [{user_name}] /setendhook_clear");
+        handle_setendhook_clear_command(&bot, chat_id, &state, token).await?;
+    } else if text.starts_with("/setendhook") {
+        msg_debug("[handle_message] routing → /setendhook");
+        println!("  [{timestamp}] ◀ [{user_name}] /setendhook");
+        handle_setendhook_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with("/instruction_clear") {
         msg_debug("[handle_message] routing → /instruction_clear");
         println!("  [{timestamp}] ◀ [{user_name}] /instruction_clear");
@@ -3166,6 +3187,9 @@ Ask in natural language to manage schedules.
 <code>/instruction &lt;text&gt;</code> — Set system instruction for AI
 <code>/instruction</code> — View current instruction
 <code>/instruction_clear</code> — Clear instruction
+<code>/setendhook &lt;msg&gt;</code> — Set notification when processing ends
+<code>/setendhook</code> — View current end hook
+<code>/setendhook_clear</code> — Clear end hook
 
 <b>Bot Messaging</b>
 Bots in the same group can collaborate via <code>/instruction</code>.
@@ -5506,6 +5530,18 @@ async fn handle_shell_command(
                         clear: false,
                     });
                 }
+
+                // Send end hook message if configured
+                if !cancelled {
+                    let end_hook_msg = {
+                        let data = state_owned.lock().await;
+                        data.settings.end_hook.get(&chat_id.0.to_string()).cloned()
+                    };
+                    if let Some(hook_msg) = end_hook_msg {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("send_message", bot_owned.send_message(chat_id, &hook_msg).await);
+                    }
+                }
             }
 
             // Queue processing
@@ -5943,6 +5979,58 @@ async fn handle_instruction_clear_command(
     }
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, "Instruction cleared.").await)?;
+    Ok(())
+}
+
+/// Handle /setendhook command - set a message to send when AI processing completes
+async fn handle_setendhook_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let body = text.strip_prefix("/setendhook").unwrap_or("").trim();
+    let key = chat_id.0.to_string();
+    if body.is_empty() {
+        // Show current end hook
+        let data = state.lock().await;
+        let current = data.settings.end_hook.get(&key);
+        let msg = match current {
+            Some(hook) => format!("Current end hook:\n{}", hook),
+            None => "No end hook set.\nUsage: /setendhook <message>".to_string(),
+        };
+        drop(data);
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, msg).await)?;
+    } else {
+        let hook = body.to_string();
+        {
+            let mut data = state.lock().await;
+            data.settings.end_hook.insert(key, hook.clone());
+            save_bot_settings(token, &data.settings);
+        }
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, format!("End hook set:\n{}", hook)).await)?;
+    }
+    Ok(())
+}
+
+/// Handle /setendhook_clear command - remove end hook for this chat
+async fn handle_setendhook_clear_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let key = chat_id.0.to_string();
+    {
+        let mut data = state.lock().await;
+        data.settings.end_hook.remove(&key);
+        save_bot_settings(token, &data.settings);
+    }
+    shared_rate_limit_wait(state, chat_id).await;
+    tg!("send_message", bot.send_message(chat_id, "End hook cleared.").await)?;
     Ok(())
 }
 
@@ -7218,6 +7306,18 @@ async fn handle_text_message(
 
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!("  [{ts}] ▶ Response sent");
+
+                // Send end hook message if configured
+                if !cancelled {
+                    let end_hook_msg = {
+                        let data = state_owned.lock().await;
+                        data.settings.end_hook.get(&chat_id.0.to_string()).cloned()
+                    };
+                    if let Some(hook_msg) = end_hook_msg {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("send_message", bot_owned.send_message(chat_id, &hook_msg).await);
+                    }
+                }
             }
 
             // === Queue processing (both during streaming and after done) ===
@@ -9134,6 +9234,18 @@ async fn execute_schedule(
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ✓ [Schedule] Done");
+
+            // Send end hook message if configured
+            if !cancelled {
+                let end_hook_msg = {
+                    let data = state_owned.lock().await;
+                    data.settings.end_hook.get(&chat_id.0.to_string()).cloned()
+                };
+                if let Some(hook_msg) = end_hook_msg {
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("send_message", bot_owned.send_message(chat_id, &hook_msg).await);
+                }
+            }
         }
 
         // For cron entries with context_summary, extract result summary for next run
@@ -9938,6 +10050,18 @@ async fn process_bot_message(
                 // The AI can use --message CLI to reply if needed.
                 // Auto-responding causes infinite ping-pong between bots.
                 msg_debug(&format!("[botmsg_poll:{}] skipping auto-response (AI uses --message if needed)", bmsg_id_for_log));
+
+                // Send end hook message if configured
+                if !cancelled {
+                    let end_hook_msg = {
+                        let data = state_owned.lock().await;
+                        data.settings.end_hook.get(&chat_id.0.to_string()).cloned()
+                    };
+                    if let Some(hook_msg) = end_hook_msg {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("send_message", bot_owned.send_message(chat_id, &hook_msg).await);
+                    }
+                }
             }
 
             // Queue processing

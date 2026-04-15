@@ -1,5 +1,11 @@
 # Changelog — cokacdir
 
+## 0.4.89 — 2026-04-15
+
+- New `/setendhook <message>` command — set a custom notification message that is sent as a separate message whenever AI processing completes. Useful as an alert when waiting for long responses. Use `/setendhook_clear` to remove. Applies to all processing types: normal AI responses, shell commands, scheduled tasks, and bot-to-bot messages. Not sent when the request is cancelled via `/stop`.
+
+---
+
 ## 0.4.88 — 2026-04-15
 
 - **File copy now preserves timestamps.** All copy operations (single file, directory recursive, paste) now retain the original modification and access times using the `filetime` crate. Directory timestamps are set after contents are fully copied to avoid being overwritten by child writes.

@@ -206,7 +206,11 @@ class ToolInstaller:
         archive_path = self.tools_dir / archive_name
 
         if not archive_path.exists():
-            if not self.download_file(self.config.zig_url, archive_path, "Zig compiler"):
+            local_cache = Path.home() / ".rustbuilder" / archive_name
+            if local_cache.exists():
+                self.logger.info(f"Using cached {archive_name} from {local_cache.parent}")
+                shutil.copy2(local_cache, archive_path)
+            elif not self.download_file(self.config.zig_url, archive_path, "Zig compiler"):
                 return False
 
         # Extract to tools directory
@@ -256,6 +260,32 @@ class ToolInstaller:
         except FileNotFoundError:
             return False
 
+    def _ensure_default_toolchain(self) -> bool:
+        """Ensure rustup has a default toolchain configured."""
+        env = self.get_env()
+        try:
+            result = subprocess.run(
+                ["rustup", "default"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if result.returncode != 0 or "no default" in result.stderr.lower() or "no default" in result.stdout.lower():
+                self.logger.info("No default Rust toolchain configured. Setting up stable...")
+                setup_result = subprocess.run(
+                    ["rustup", "default", "stable"],
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                if setup_result.returncode != 0:
+                    self.logger.error(f"Failed to set default toolchain: {setup_result.stderr}")
+                    return False
+                self.logger.success("Default Rust toolchain set to stable")
+            return True
+        except FileNotFoundError:
+            return False
+
     def install_cargo_zigbuild(self) -> bool:
         """Install cargo-zigbuild."""
         if self.is_cargo_zigbuild_installed():
@@ -264,6 +294,9 @@ class ToolInstaller:
 
         if not self.is_rust_installed():
             self.logger.error("Rust must be installed first")
+            return False
+
+        if not self._ensure_default_toolchain():
             return False
 
         self.logger.info("Installing cargo-zigbuild...")
@@ -319,6 +352,9 @@ class ToolInstaller:
 
         if not self.is_rust_installed():
             self.logger.error("Rust must be installed first")
+            return False
+
+        if not self._ensure_default_toolchain():
             return False
 
         self.logger.info("Installing cargo-xwin...")
@@ -422,7 +458,11 @@ class ToolInstaller:
         archive_path = self.tools_dir / archive_name
 
         if not archive_path.exists():
-            if not self.download_file(
+            local_cache = Path.home() / ".rustbuilder" / archive_name
+            if local_cache.exists():
+                self.logger.info(f"Using cached {archive_name} from {local_cache.parent}")
+                shutil.copy2(local_cache, archive_path)
+            elif not self.download_file(
                 self.config.macos_sdk_url, archive_path, "macOS SDK"
             ):
                 return False

@@ -104,6 +104,7 @@ pub fn verify_completion_opencode(session_id: &str, working_dir: &str) -> Result
         ])
         .current_dir(working_dir)
         .env("PATH", crate::services::claude::enhanced_path_for_bin(&opencode_bin))
+        .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -729,6 +730,7 @@ fn build_opencode_command(
     let mut cmd = Command::new(&opencode_bin);
     cmd.args(&args)
         .current_dir(working_dir)
+        .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2041,6 +2043,18 @@ async fn spawn_opencode_serve(
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(["serve", "--port", "0", "--hostname", "127.0.0.1"])
         .current_dir(working_dir)
+        // Auto-approve every permission request. Without this, any tool call
+        // touching a path outside the session directory (e.g. glob on
+        // ~/.cokacdir/docs) makes opencode create a pending `external_directory`
+        // permission and park the session in "busy" forever — the bot has no
+        // UI to approve these in a Telegram flow.
+        //
+        // Value must be a JSON object: opencode merges it via `mergeDeep` into
+        // the effective config (see opencode config/config.ts), so a bare
+        // JSON string like `"allow"` silently no-ops. `{"*":"allow"}` becomes
+        // the ruleset rule `{permission:"*", pattern:"*", action:"allow"}`
+        // which matches every permission check including `external_directory`.
+        .env("OPENCODE_PERMISSION", r#"{"*":"allow"}"#)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

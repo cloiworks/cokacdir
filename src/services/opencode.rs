@@ -43,6 +43,120 @@ fn opencode_debug(msg: &str) {
     debug_log_to("opencode.log", msg);
 }
 
+/// Verify whether an OpenCode session's task has been fully completed.
+///
+/// Mirrors the contract of `claude::verify_completion` and
+/// `codex::verify_completion_codex`:
+/// returns `complete=true` iff the model's reply contains `mission_complete`
+/// and not `mission_pending`; otherwise `feedback` carries the remaining-work
+/// text with keywords stripped.
+///
+/// Isolation: uses OpenCode's native `--fork`. `opencode run --session <ORIG>
+/// --fork` creates a branched session whose state is a copy of the original
+/// at the time of forking — the original's rows are never written to
+/// (empirically verified: hash identical before/after). `--agent plan`
+/// applies the `plan` built-in agent to the fork; its default permissions
+/// deny write/bash, which is the closest OpenCode offers to Claude's
+/// `--tools ""` (soft, not hard).
+///
+/// Output is read as plain text on stdout — OpenCode's default formatter
+/// writes exactly the agent's reply to stdout (header decorations go to
+/// stderr), so no JSON parsing is needed. This mirrors the plain-text shape
+/// used by `claude::verify_completion` and keeps this function symmetrical
+/// with the Claude path.
+///
+/// Forked session rows are NOT cleaned up. Claude's `--fork-session` also
+/// leaves a persisted .jsonl file in the user's project directory; OpenCode
+/// forks persist the same way. Keeping these symmetrical avoids a DELETE
+/// code path whose failure modes would be worse than the clutter it avoids.
+pub fn verify_completion_opencode(session_id: &str, working_dir: &str) -> Result<crate::services::claude::VerifyResult, String> {
+    opencode_debug("=== verify_completion_opencode START ===");
+    opencode_debug(&format!("  session_id: {}", session_id));
+    opencode_debug(&format!("  working_dir: {}", working_dir));
+
+    let opencode_bin = resolve_opencode_path()
+        .unwrap_or_else(|| "opencode".to_string());
+    opencode_debug(&format!("  opencode_bin: {}", opencode_bin));
+
+    // Verify prompt is short because the fork already carries conversation
+    // context. Spelling out "mission_complete" / "mission_pending" literally
+    // is what the parser below looks for.
+    let verify_prompt =
+        "Review the conversation you just had. Judge whether the user's \
+         original task has been fully, correctly, and safely completed. \
+         Do NOT call any tools, do NOT read files, do NOT run commands — \
+         judge purely from the conversation history visible to you. \
+         Respond with ONLY one of:\n\
+         - `mission_complete` (exactly this single word) if the task is fully done.\n\
+         - `mission_pending` followed by a description of what still needs to be done.\n\
+         Do NOT restate what was already done. Only describe remaining work.";
+
+    // Spawn the fork. No --format flag means plain text; stdin is closed so
+    // opencode doesn't block on input.
+    let spawn_start = std::time::Instant::now();
+    let child = Command::new(&opencode_bin)
+        .args([
+            "run",
+            "--session", session_id,
+            "--fork",
+            "--agent", "plan",
+            verify_prompt,
+        ])
+        .current_dir(working_dir)
+        .env("PATH", crate::services::claude::enhanced_path_for_bin(&opencode_bin))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn opencode for verify: {}", e))?;
+    opencode_debug(&format!("  spawned in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
+
+    let wait_start = std::time::Instant::now();
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to read opencode verify output: {}", e))?;
+    opencode_debug(&format!("  completed in {:?}, exit={:?}",
+        wait_start.elapsed(), output.status.code()));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "verify_completion_opencode process failed (exit {:?}). stderr: {}",
+            output.status.code(), &stderr[..stderr.len().min(500)]));
+    }
+
+    // OpenCode default format writes ONLY the agent's reply to stdout (the
+    // "> plan · gpt-5.4" banner goes to stderr). There is no prompt echo,
+    // so direct substring matching on stdout is safe.
+    let reply = String::from_utf8_lossy(&output.stdout).to_string();
+    opencode_debug(&format!("  reply len={}, preview: {}",
+        reply.len(), reply.chars().take(300).collect::<String>()));
+
+    if reply.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "verify_completion_opencode produced empty reply. stderr: {}",
+            &stderr[..stderr.len().min(500)]));
+    }
+
+    // Same decision rule as claude::verify_completion: complete iff
+    // `mission_complete` is present AND `mission_pending` is absent.
+    let pending = reply.contains("mission_pending");
+    let complete = reply.contains("mission_complete") && !pending;
+    let feedback = if complete {
+        None
+    } else {
+        let cleaned = reply.replace("mission_pending", "").replace("mission_complete", "");
+        let cleaned = cleaned.trim();
+        if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
+    };
+
+    opencode_debug(&format!("  complete={}, feedback_len={:?}",
+        complete, feedback.as_ref().map(|s| s.len())));
+    opencode_debug("=== verify_completion_opencode END ===");
+
+    Ok(crate::services::claude::VerifyResult { complete, feedback })
+}
+
 /// Truncate a string for log previews (char-boundary safe).
 fn log_preview(s: &str, max: usize) -> &str {
     if s.len() <= max { return s; }

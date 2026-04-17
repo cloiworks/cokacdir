@@ -1,5 +1,14 @@
 # Changelog — cokacdir
 
+## 0.4.92 — 2026-04-17
+
+- **`/loop` now works with Codex and OpenCode**, not just Claude. After each turn the bot still asks the AI to judge whether the task is fully done and re-injects remaining work until it is, but the verification mechanics are now provider-specific: Claude uses its native `--fork-session`; Codex replays a full-fidelity session archive into an isolated `codex exec --ephemeral` call that never touches the original rollout file; OpenCode uses `opencode run --session <id> --fork --agent plan`. Gemini still falls back with a clear message.
+- New full-fidelity session archive at `~/.cokacdir/ai_sessions_full/{session_id}.json` — parallel to the existing truncated UI summary. Preserves all text, tool arguments, tool results, timestamps, model info, and token usage for Claude/Codex/Gemini/OpenCode sessions. Used by the Codex verifier; written automatically alongside the summary.
+- The `/loop` verification progress indicator is now an animated 🔍/🔎 spinner that cycles letter-by-letter while the verifier runs.
+- Fixed: `/model` help listed Opus as 4.6; now correctly shows Opus 4.7.
+
+---
+
 ## 0.4.89 — 2026-04-15
 
 - New `/setendhook <message>` command — set a custom notification message that is sent as a separate message whenever AI processing completes. Useful as an alert when waiting for long responses. Use `/setendhook_clear` to remove. Applies to all processing types: normal AI responses, shell commands, scheduled tasks, and bot-to-bot messages. Not sent when the request is cancelled via `/stop`.

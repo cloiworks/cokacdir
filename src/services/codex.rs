@@ -86,6 +86,160 @@ fn codex_debug_log(msg: &str) {
     debug_log_to("codex.log", msg);
 }
 
+/// Verify whether a Codex session's task has been fully completed.
+///
+/// Mirrors the high-level contract of `claude::verify_completion`, but the
+/// mechanics differ because Codex has no non-interactive `--fork-session`:
+/// instead of forking the live session, we read the full-fidelity archive
+/// produced by `session_archive` (which is kept up to date by the normal
+/// convert-and-save flow), synthesize a transcript, and dispatch a fresh
+/// `codex exec --ephemeral` call that is completely independent of the
+/// original session — no `resume`, no `thread_id` passed in, no rollout
+/// file written. This guarantees the user-facing Codex session is not
+/// modified by the verification call.
+///
+/// Contract:
+/// - Returns `complete=true` iff the response contains `mission_complete`
+///   and not `mission_pending`.
+/// - `feedback` carries the "what remains" text with keywords stripped,
+///   ready to be re-injected as the next user prompt.
+pub fn verify_completion_codex(session_id: &str, working_dir: &str) -> Result<crate::services::claude::VerifyResult, String> {
+    codex_debug_log("=== verify_completion_codex START ===");
+    codex_debug_log(&format!("  session_id: {}", session_id));
+    codex_debug_log(&format!("  working_dir: {}", working_dir));
+
+    // 1. Load the archive (full fidelity, deduplicated, provider-agnostic).
+    let transcript = crate::services::session_archive::build_verification_transcript(session_id)?;
+    codex_debug_log(&format!("  transcript: {} chars", transcript.len()));
+
+    let codex_bin = get_codex_path()
+        .ok_or_else(|| {
+            codex_debug_log("  ERROR: Codex CLI not found");
+            "Codex CLI not found".to_string()
+        })?;
+
+    // 2. Build verification prompt. Read-only sandbox + "no tools" directive
+    //    is the best Codex offers in place of Claude's `--tools ""`.
+    let verify_prompt = format!(
+        "Review the task transcript below. Judge whether the task has been \
+         fully, correctly, and safely completed. \
+         Do NOT call any tools, do NOT read files, do NOT run commands — \
+         judge purely from the transcript. \
+         If everything is complete and correct, respond with ONLY the word: mission_complete \
+         If something is missing, incomplete, or incorrect, respond with: mission_pending \
+         then describe specifically what still needs to be done. Do NOT repeat \
+         what was already done. Only describe remaining work.\n\n\
+         === TRANSCRIPT ===\n{}\n=== END TRANSCRIPT ===",
+        transcript);
+
+    // 3. Spawn a fresh, ephemeral Codex session. No `resume`, no session_id,
+    //    no thread_id. --ephemeral prevents a rollout file from being created.
+    //    The original user session is untouched.
+    //
+    // We route the final agent message to a tempfile via --output-last-message.
+    // This is crucial: Codex's non-JSON stdout echoes the user prompt under a
+    // "User instructions:" block. Our verify prompt itself contains the tokens
+    // `mission_complete` and `mission_pending` as instructions; parsing stdout
+    // directly would therefore ALWAYS find `mission_pending` (false positive)
+    // and keep the loop running to its iteration cap. Reading the last-message
+    // file instead yields only the model's actual reply.
+    let out_path = std::env::temp_dir().join(format!(
+        "cokac_verify_codex_{}_{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos()).unwrap_or(0)));
+    // Best-effort pre-clean; ignore failure.
+    let _ = std::fs::remove_file(&out_path);
+
+    // Note: `codex exec` does not accept `--ask-for-approval`; exec is
+    // inherently non-interactive so there's nothing to prompt for. The
+    // read-only sandbox prevents any filesystem writes the model might try,
+    // and the prompt itself instructs "do not call any tools".
+    let out_path_str = out_path.to_string_lossy().to_string();
+    let args: Vec<&str> = vec![
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--sandbox", "read-only",
+        "--output-last-message", &out_path_str,
+        "-",
+    ];
+    codex_debug_log(&format!("  args: {:?}", args));
+
+    let spawn_start = std::time::Instant::now();
+    let mut child = Command::new(codex_bin)
+        .args(&args)
+        .current_dir(working_dir)
+        .env("PATH", crate::services::claude::enhanced_path_for_bin(codex_bin))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            codex_debug_log(&format!("  ERROR: Failed to spawn: {}", e));
+            format!("Failed to start Codex for verify_completion: {}", e)
+        })?;
+    codex_debug_log(&format!("  spawned in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(verify_prompt.as_bytes());
+        drop(stdin);
+    }
+
+    let wait_start = std::time::Instant::now();
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to read verify output: {}", e))?;
+    codex_debug_log(&format!("  completed in {:?}, exit={:?}", wait_start.elapsed(), output.status.code()));
+
+    // Read and clean up the last-message file regardless of exit status so we
+    // don't leak tempfiles even on failure paths.
+    let last_message = std::fs::read_to_string(&out_path).ok();
+    let _ = std::fs::remove_file(&out_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(format!(
+            "verify_completion_codex process failed (exit {:?}). stderr: {}",
+            output.status.code(), &stderr[..stderr.len().min(500)]));
+    }
+
+    // 4. Extract the model's final response. --output-last-message gives us
+    //    exactly the agent's final message text, with no prompt echo or
+    //    session banner boilerplate.
+    let response_text = match last_message {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!(
+                "verify_completion_codex produced no last-message output. stderr: {}",
+                &stderr[..stderr.len().min(500)]));
+        }
+    };
+    codex_debug_log(&format!("  last_message len={}, preview: {}",
+        response_text.len(), response_text.chars().take(300).collect::<String>()));
+
+    // Same decision rule as claude::verify_completion: treat as complete only
+    // when `mission_complete` is present AND `mission_pending` is absent.
+    let pending = response_text.contains("mission_pending");
+    let complete = response_text.contains("mission_complete") && !pending;
+    let feedback = if complete {
+        None
+    } else {
+        let cleaned = response_text
+            .replace("mission_pending", "")
+            .replace("mission_complete", "");
+        let cleaned = cleaned.trim();
+        if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
+    };
+
+    codex_debug_log(&format!("  complete={}, feedback={:?}",
+        complete, feedback.as_ref().map(|s| &s[..s.len().min(200)])));
+    codex_debug_log("=== verify_completion_codex END ===");
+
+    Ok(crate::services::claude::VerifyResult { complete, feedback })
+}
+
 /// Execute a command using Codex CLI with streaming output.
 ///
 /// Parameters mirror `claude::execute_command_streaming` for consistency,

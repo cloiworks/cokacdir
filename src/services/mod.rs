@@ -9,4 +9,5 @@ pub mod messenger_bridge;
 pub mod remote;
 pub mod remote_transfer;
 pub mod dedup;
+pub mod session_archive;
 pub mod telegram;

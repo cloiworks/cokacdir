@@ -3099,11 +3099,14 @@ async fn handle_message(
             shared_rate_limit_wait(&state, chat_id).await;
             tg!("send_message", bot.send_message(chat_id, "Usage: /loop [N] <request>\nRepeats until the task is fully completed.\nOptional: N = max iterations (default 5, 0 = unlimited)").await)?;
         } else {
-            // /loop requires Claude provider (uses --fork-session for verification)
+            // /loop uses a self-verification step that currently supports
+            // Claude (native --fork-session), Codex (ephemeral exec over the
+            // full-fidelity session archive), and OpenCode (native --fork with
+            // the `plan` agent). Other providers (currently Gemini) are rejected.
             let provider = { let _m = get_model(&state.lock().await.settings, chat_id); provider_from_model(_m.as_deref()).to_string() };
-            if provider != "claude" {
+            if provider != "claude" && provider != "codex" && provider != "opencode" {
                 shared_rate_limit_wait(&state, chat_id).await;
-                tg!("send_message", bot.send_message(chat_id, "/loop requires Claude model (uses --fork-session for verification).").await)?;
+                tg!("send_message", bot.send_message(chat_id, "/loop currently supports Claude, Codex, or OpenCode models only.").await)?;
             } else {
                 // Reject if a loop is already running for this chat
                 {
@@ -3984,6 +3987,13 @@ fn convert_and_save_session(info: &ResolvedSession, canonical_path: &str) {
     } else {
         msg_debug("[convert_session] serde_json::to_string_pretty failed");
     }
+
+    crate::services::session_archive::archive_and_save_session(
+        session_provider_str(info.provider),
+        &info.jsonl_path,
+        &info.session_id,
+        canonical_path,
+    );
 }
 
 /// Find the most recently modified external session whose cwd matches the given path.
@@ -6444,7 +6454,7 @@ async fn handle_model_command(
             msg.push_str("\n<b>Claude:</b>\n");
             msg.push_str("<code>/model claude</code> — default\n");
             msg.push_str("<code>/model claude:sonnet</code> — Sonnet 4.6\n");
-            msg.push_str("<code>/model claude:opus</code> — Opus 4.6\n");
+            msg.push_str("<code>/model claude:opus</code> — Opus 4.7\n");
             msg.push_str("<code>/model claude:haiku</code> — Haiku 4.5\n");
             msg.push_str("<code>/model claude:sonnet[1m]</code> — Sonnet 1M ctx\n");
         }
@@ -7453,8 +7463,13 @@ async fn handle_text_message(
                     }
                 }
 
-                // === /loop verification: fork session and check completeness ===
-                if !cancelled && !cancel_token.cancelled.load(Ordering::Relaxed) && provider_str == "claude" {
+                // === /loop verification: check completeness after each turn ===
+                // Provider-specific mechanics (Claude forks live session with
+                // --fork-session; Codex reads the full-fidelity archive and
+                // dispatches an independent --ephemeral exec). The surrounding
+                // loop-state / cancel / re-inject logic is shared.
+                if !cancelled && !cancel_token.cancelled.load(Ordering::Relaxed)
+                    && (provider_str == "claude" || provider_str == "codex" || provider_str == "opencode") {
                     let loop_info = {
                         let data = state_owned.lock().await;
                         data.loop_states.get(&chat_id).map(|ls| {
@@ -7465,17 +7480,103 @@ async fn handle_text_message(
                     };
                     if let Some((remaining, max_iterations, original_request, sid, cwd)) = loop_info {
                         if let Some(session_id) = sid {
-                            msg_debug(&format!("[loop] verifying: session_id={}, remaining={}, request={:?}",
-                                session_id, remaining, truncate_str(&original_request, 60)));
-                            // Show spinner during verification
+                            msg_debug(&format!("[loop] verifying ({}): session_id={}, remaining={}, request={:?}",
+                                provider_str, session_id, remaining, truncate_str(&original_request, 60)));
+                            // Show spinner during verification. Alternating
+                            // magnifying-glass frames (🔍/🔎) typed one letter
+                            // at a time give a lightweight "scanning" feel
+                            // while the verifier runs. Animation runs in a
+                            // background task so the main path is not blocked
+                            // by frame edits; it is stopped once verify
+                            // returns, before the message is deleted.
+                            const VERIFY_SPINNER: &[&str] = &[
+                                "🔍 V",           "🔎 Ve",          "🔍 Ver",
+                                "🔎 Veri",        "🔍 Verif",       "🔎 Verify",
+                                "🔍 Verifyi",     "🔎 Verifyin",    "🔍 Verifying",
+                                "🔎 Verifying.",  "🔍 Verifying..", "🔎 Verifying...",
+                            ];
                             shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let verify_msg = tg!("send_message", bot_owned.send_message(chat_id, "🔍 Verifying...").await);
+                            let verify_msg = tg!("send_message", bot_owned.send_message(chat_id, VERIFY_SPINNER[0]).await);
                             let verify_msg_id = verify_msg.ok().map(|m| m.id);
+
+                            // Start background frame-edit task
+                            let verify_anim_stop = Arc::new(AtomicBool::new(false));
+                            let verify_anim_handle = if let Some(msg_id) = verify_msg_id {
+                                let bot_anim = bot_owned.clone();
+                                let state_anim = state_owned.clone();
+                                let stop_flag = verify_anim_stop.clone();
+                                Some(tokio::spawn(async move {
+                                    let mut idx: usize = 1;
+                                    let mut last_text = VERIFY_SPINNER[0].to_string();
+                                    while !stop_flag.load(Ordering::Relaxed) {
+                                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                                        if stop_flag.load(Ordering::Relaxed) { break; }
+                                        let frame = VERIFY_SPINNER[idx % VERIFY_SPINNER.len()];
+                                        idx += 1;
+                                        if frame != last_text {
+                                            shared_rate_limit_wait(&state_anim, chat_id).await;
+                                            if stop_flag.load(Ordering::Relaxed) { break; }
+                                            let _ = tg!("edit_message", bot_anim.edit_message_text(chat_id, msg_id, frame).await);
+                                            last_text = frame.to_string();
+                                        }
+                                    }
+                                }))
+                            } else {
+                                None
+                            };
+
                             let sid_clone = session_id.clone();
                             let cwd_clone = cwd.clone();
+                            let provider_for_verify = provider_str;
+                            // The Codex verifier reads the full-fidelity
+                            // archive, so refresh it before the verify call.
+                            // (OpenCode uses native `--fork` and doesn't need
+                            // the archive; Claude forks its live session and
+                            // doesn't need it either.)
+                            // archive_and_save_session is called directly —
+                            // not via convert_and_save_session — because the
+                            // latter short-circuits when its summary JSON is
+                            // up-to-date, which would skip the archive
+                            // refresh too. archive_and_save_session has its
+                            // own independent mtime check so it stays
+                            // idempotent across repeated calls.
+                            if provider_for_verify == "codex" {
+                                let sid_refresh = sid_clone.clone();
+                                let cwd_refresh = cwd_clone.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    match resolve_codex_by_id(&sid_refresh) {
+                                        Some(info) => {
+                                            msg_debug(&format!(
+                                                "[loop] codex archive refresh: jsonl={}, id={}",
+                                                info.jsonl_path.display(), info.session_id));
+                                            crate::services::session_archive::archive_and_save_session(
+                                                "codex",
+                                                &info.jsonl_path,
+                                                &info.session_id,
+                                                &cwd_refresh,
+                                            );
+                                        }
+                                        None => {
+                                            msg_debug(&format!(
+                                                "[loop] codex archive refresh SKIPPED: \
+                                                 resolve_codex_by_id({}) returned None — \
+                                                 verify may fail with \"Archive not found\"",
+                                                sid_refresh));
+                                        }
+                                    }
+                                }).await.ok();
+                            }
                             let verify_result = tokio::task::spawn_blocking(move || {
-                                crate::services::claude::verify_completion(&sid_clone, &cwd_clone)
+                                match provider_for_verify {
+                                    "codex" => crate::services::codex::verify_completion_codex(&sid_clone, &cwd_clone),
+                                    "opencode" => crate::services::opencode::verify_completion_opencode(&sid_clone, &cwd_clone),
+                                    _ => crate::services::claude::verify_completion(&sid_clone, &cwd_clone),
+                                }
                             }).await;
+                            // Stop animation and await its task so no stray
+                            // edit lands after the delete below.
+                            verify_anim_stop.store(true, Ordering::Relaxed);
+                            if let Some(h) = verify_anim_handle { let _ = h.await; }
                             // Remove spinner
                             if let Some(msg_id) = verify_msg_id {
                                 shared_rate_limit_wait(&state_owned, chat_id).await;

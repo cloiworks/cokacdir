@@ -86,7 +86,7 @@ When turning queue off, any existing queued messages are cleared.
 
 ## Loop — Self-Verification Loop
 
-The `/loop` command keeps running the same task until the bot itself decides the task is fully and correctly completed. After every response, the bot forks the session and asks Claude to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.
+The `/loop` command keeps running the same task until the bot itself decides the task is fully and correctly completed. After every response, the bot runs a provider-specific verification step and asks the AI to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.
 
 Useful for tasks where one shot is rarely enough — multi-step refactors, "keep trying until tests pass", "fix everything the linter reports", and similar.
 
@@ -108,7 +108,11 @@ Examples:
 
 ### Requirements
 
-- **Claude model only.** `/loop` uses `--fork-session` for verification, which is Claude-specific. Other providers will be rejected with a message.
+- **Claude, Codex, or OpenCode model.** Each provider has its own isolation mechanism for verification:
+  - **Claude**: `--fork-session` (native live-session fork).
+  - **Codex**: independent `codex exec --ephemeral` with a transcript synthesized from the full-fidelity archive. No `resume`, no `thread_id` — the original session file is byte-identical before/after.
+  - **OpenCode**: native `opencode run --session <ID> --fork --agent plan` — OpenCode forks the session natively so the original stays intact. Output is read as plain text (agent reply lands on stdout, banner decorations go to stderr). The forked session row persists in `opencode.db` — same "fork and leak" pattern as Claude's `--fork-session` which also leaves its forked .jsonl file behind.
+  Gemini sessions will be rejected with a message.
 - **One loop per chat at a time.** If a loop is already running, a new `/loop` is rejected. Use `/stop` to cancel the current loop first.
 
 ### What You'll See
@@ -117,7 +121,7 @@ Examples:
 |---------|---------|
 | `🔄 Loop started (max N iterations)` | Loop has begun |
 | `🔄 Loop started (unlimited)` | Started in `/loop 0` mode |
-| `🔍 Verifying...` | Bot is forking the session to judge completeness |
+| `🔍 Verifying...` (animated 🔍/🔎 spinner) | Bot is running the verification step to judge completeness |
 | `🔄 Loop iteration K/N` followed by feedback | Verification said incomplete; re-injecting feedback |
 | `✅ Loop complete — task verified as done.` | Verification said complete; loop ends |
 | `⚠️ Loop limit reached. Remaining issue: ...` | Hit the iteration cap before completion |
@@ -132,7 +136,10 @@ Examples:
 ### How It Works (Brief)
 
 1. Your `<request>` is sent as a normal message.
-2. After the response completes, the bot spawns a verifier Claude with the session forked, no tools, single turn, and a prompt asking for either `mission_complete` or `mission_pending: <what's left>`.
+2. After the response completes, the bot spawns a verifier with a transcript of the conversation and a prompt asking for either `mission_complete` or `mission_pending: <what's left>`.
+   - **Claude**: `claude -p --resume <id> --fork-session --max-turns 1 --tools ""` — the live session is forked and no tools are allowed.
+   - **Codex**: the verifier reads the archive at `~/.cokacdir/ai_sessions_full/<id>.json`, synthesizes a transcript, and dispatches a fresh `codex exec --ephemeral --sandbox read-only`. No `resume`, no `thread_id`, no rollout file.
+   - **OpenCode**: `opencode run --session <id> --fork --agent plan "<prompt>"` — OpenCode native fork. The original session is preserved byte-identical; the fork carries the full conversation history. Reply is read as plain text on stdout, same pattern as Claude. The forked session row persists in the DB (not cleaned up).
 3. If the answer is `mission_complete` (and not also `mission_pending`), the loop ends.
 4. Otherwise, the remaining work text is sent back as the next user prompt, and the cycle repeats.
 5. Once the iteration cap is reached or `/stop` fires, the loop terminates.
@@ -140,8 +147,8 @@ Examples:
 ### Tips
 
 - `/loop 0` (unlimited) is powerful but has no built-in safety net. Pair it with a clear stopping criterion in the request itself ("until the test command exits 0").
-- Each iteration is a real Claude turn — token cost scales with iteration count.
-- The verification step is also a Claude call (single turn, no tools), so each loop iteration costs roughly **1 task turn + 1 verify turn**.
+- Each iteration is a real AI turn — token cost scales with iteration count.
+- The verification step is also an AI call (single turn, no tools), so each loop iteration costs roughly **1 task turn + 1 verify turn**.
 
 ---
 

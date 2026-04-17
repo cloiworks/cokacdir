@@ -57,8 +57,8 @@ export default function RequestManagement() {
 
       <SubSection title={String(t('Loop — Self-Verification Loop', '루프 — 자가 검증 반복'))}>
         <P>{t(
-          <>The <IC>/loop</IC> command keeps running the same task until the bot itself decides it is fully and correctly completed. After every response, the bot forks the session and asks Claude to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.</>,
-          <><IC>/loop</IC> 명령은 봇이 작업이 완전하고 올바르게 끝났다고 스스로 판단할 때까지 같은 작업을 반복 실행합니다. 매 응답 직후 봇은 세션을 fork하여 Claude에게 작업 완료 여부를 평가하도록 요청합니다. 끝나지 않았다면 남은 작업을 다음 프롬프트로 재주입하고 다시 시도합니다.</>
+          <>The <IC>/loop</IC> command keeps running the same task until the bot itself decides it is fully and correctly completed. After every response, the bot runs a provider-specific verification step and asks the AI to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.</>,
+          <><IC>/loop</IC> 명령은 봇이 작업이 완전하고 올바르게 끝났다고 스스로 판단할 때까지 같은 작업을 반복 실행합니다. 매 응답 직후 봇은 프로바이더별 검증 단계를 실행하여 AI에게 작업 완료 여부를 평가하도록 요청합니다. 끝나지 않았다면 남은 작업을 다음 프롬프트로 재주입하고 다시 시도합니다.</>
         )}</P>
         <P>{t(
           <>Useful for tasks where one shot is rarely enough — multi-step refactors, "keep trying until tests pass", "fix everything the linter reports", and similar.</>,
@@ -84,8 +84,8 @@ export default function RequestManagement() {
         </h3>
         <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
           <li>{t(
-            <><strong className="text-zinc-300">Claude model only.</strong> Verification uses <IC>--fork-session</IC>, which is Claude-specific. Other providers are rejected.</>,
-            <><strong className="text-zinc-300">Claude 모델 전용.</strong> 검증은 Claude 전용 기능인 <IC>--fork-session</IC>을 사용합니다. 다른 프로바이더는 거부됩니다.</>
+            <><strong className="text-zinc-300">Claude, Codex, or OpenCode model.</strong> Each provider uses its own isolation mechanism for verification: Claude uses the native <IC>--fork-session</IC>, Codex runs an independent <IC>codex exec --ephemeral</IC> with a transcript synthesized from the full-fidelity archive (original rollout file stays byte-identical), and OpenCode uses the native <IC>opencode run --session &lt;id&gt; --fork --agent plan</IC>. Gemini is still rejected.</>,
+            <><strong className="text-zinc-300">Claude, Codex, OpenCode 모델 지원.</strong> 각 프로바이더는 검증에 자체 격리 방식을 사용합니다: Claude는 네이티브 <IC>--fork-session</IC>, Codex는 full-fidelity 아카이브에서 트랜스크립트를 합성해 독립 <IC>codex exec --ephemeral</IC>을 실행(원본 rollout 파일 바이트 단위로 불변), OpenCode는 네이티브 <IC>opencode run --session &lt;id&gt; --fork --agent plan</IC>을 사용합니다. Gemini는 거부됩니다.</>
           )}</li>
           <li>{t(
             <><strong className="text-zinc-300">One loop per chat at a time.</strong> If a loop is already running, a new <IC>/loop</IC> is rejected — cancel with <IC>/stop</IC> first.</>,
@@ -100,7 +100,7 @@ export default function RequestManagement() {
           rows={[
             ['🔄 Loop started (max N iterations)', String(t('Loop has begun', '루프가 시작됨'))],
             ['🔄 Loop started (unlimited)', String(t('Started in /loop 0 mode', '/loop 0 모드로 시작'))],
-            ['🔍 Verifying...', String(t('Bot is forking the session to judge completeness', '봇이 완료 여부를 판단하기 위해 세션을 fork하는 중'))],
+            ['🔍 Verifying... (animated 🔍/🔎 spinner)', String(t('Bot is running the verification step to judge completeness', '봇이 완료 여부를 판단하기 위해 검증 단계를 실행하는 중'))],
             ['🔄 Loop iteration K/N + feedback', String(t('Verification said incomplete; re-injecting feedback', '검증 결과 미완료; 피드백을 재주입'))],
             ['✅ Loop complete — task verified as done.', String(t('Verification said complete; loop ends', '검증 결과 완료; 루프 종료'))],
             ['⚠️ Loop limit reached. Remaining issue: ...', String(t('Hit the iteration cap before completion', '완료 전에 반복 한도 도달'))],
@@ -124,8 +124,8 @@ export default function RequestManagement() {
             <><IC>/loop 0</IC>(무한)은 강력하지만 안전 장치가 내장되어 있지 않습니다. 요청 자체에 명확한 종료 조건을 함께 명시하세요(예: "테스트 명령이 0으로 종료될 때까지").</>
           )}</li>
           <li>{t(
-            <>Each iteration is a real Claude turn — token cost scales with iteration count. Each loop iteration costs roughly <strong className="text-zinc-300">1 task turn + 1 verify turn</strong>.</>,
-            <>매 반복은 실제 Claude 턴입니다 — 토큰 비용은 반복 횟수에 비례합니다. 매 루프 반복은 대략 <strong className="text-zinc-300">1 작업 턴 + 1 검증 턴</strong>의 비용이 듭니다.</>
+            <>Each iteration is a real AI turn — token cost scales with iteration count. The verification step is also an AI call (single turn, no tools), so each loop iteration costs roughly <strong className="text-zinc-300">1 task turn + 1 verify turn</strong>.</>,
+            <>매 반복은 실제 AI 턴입니다 — 토큰 비용은 반복 횟수에 비례합니다. 검증 단계도 AI 호출(단일 턴, 도구 없음)이므로 매 루프 반복은 대략 <strong className="text-zinc-300">1 작업 턴 + 1 검증 턴</strong>의 비용이 듭니다.</>
           )}</li>
         </ul>
       </SubSection>

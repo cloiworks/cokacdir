@@ -54,6 +54,120 @@ export default function RequestManagement() {
           ]}
         />
       </SubSection>
+
+      <SubSection title={String(t('Loop — Self-Verification Loop', '루프 — 자가 검증 반복'))}>
+        <P>{t(
+          <>The <IC>/loop</IC> command keeps running the same task until the bot itself decides it is fully and correctly completed. After every response, the bot forks the session and asks Claude to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.</>,
+          <><IC>/loop</IC> 명령은 봇이 작업이 완전하고 올바르게 끝났다고 스스로 판단할 때까지 같은 작업을 반복 실행합니다. 매 응답 직후 봇은 세션을 fork하여 Claude에게 작업 완료 여부를 평가하도록 요청합니다. 끝나지 않았다면 남은 작업을 다음 프롬프트로 재주입하고 다시 시도합니다.</>
+        )}</P>
+        <P>{t(
+          <>Useful for tasks where one shot is rarely enough — multi-step refactors, "keep trying until tests pass", "fix everything the linter reports", and similar.</>,
+          <>한 번에 끝나기 어려운 작업에 유용합니다 — 다단계 리팩터링, "테스트가 통과할 때까지 계속 시도", "린터가 보고한 모든 것을 수정" 같은 경우입니다.</>
+        )}</P>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('Usage', '사용법')}
+        </h3>
+        <CommandTable
+          headers={[String(t('Command', '명령어')), String(t('Description', '설명'))]}
+          rows={[
+            ['/loop <request>', String(t('Repeat up to 5 times (default)', '최대 5회 반복 (기본값)'))],
+            ['/loop <N> <request>', String(t('Repeat up to N times', '최대 N회 반복'))],
+            ['/loop 0 <request>', String(t('Repeat with no upper bound — use with care', '상한 없이 반복 — 주의해서 사용'))],
+          ]}
+        />
+        <P>{t(
+          <>Examples: <IC>/loop fix all clippy warnings</IC>, <IC>/loop 10 add unit tests until coverage is above 90%</IC>, <IC>/loop 0 keep trying until the build passes</IC>.</>,
+          <>예: <IC>/loop fix all clippy warnings</IC>, <IC>/loop 10 add unit tests until coverage is above 90%</IC>, <IC>/loop 0 keep trying until the build passes</IC>.</>
+        )}</P>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('Requirements', '요구 사항')}
+        </h3>
+        <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
+          <li>{t(
+            <><strong className="text-zinc-300">Claude model only.</strong> Verification uses <IC>--fork-session</IC>, which is Claude-specific. Other providers are rejected.</>,
+            <><strong className="text-zinc-300">Claude 모델 전용.</strong> 검증은 Claude 전용 기능인 <IC>--fork-session</IC>을 사용합니다. 다른 프로바이더는 거부됩니다.</>
+          )}</li>
+          <li>{t(
+            <><strong className="text-zinc-300">One loop per chat at a time.</strong> If a loop is already running, a new <IC>/loop</IC> is rejected — cancel with <IC>/stop</IC> first.</>,
+            <><strong className="text-zinc-300">채팅당 동시 한 개의 루프만 가능.</strong> 이미 루프가 진행 중이면 새 <IC>/loop</IC>는 거부됩니다 — 먼저 <IC>/stop</IC>으로 취소하세요.</>
+          )}</li>
+        </ul>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('What You\'ll See', '표시되는 메시지')}
+        </h3>
+        <CommandTable
+          headers={[String(t('Message', '메시지')), String(t('Meaning', '의미'))]}
+          rows={[
+            ['🔄 Loop started (max N iterations)', String(t('Loop has begun', '루프가 시작됨'))],
+            ['🔄 Loop started (unlimited)', String(t('Started in /loop 0 mode', '/loop 0 모드로 시작'))],
+            ['🔍 Verifying...', String(t('Bot is forking the session to judge completeness', '봇이 완료 여부를 판단하기 위해 세션을 fork하는 중'))],
+            ['🔄 Loop iteration K/N + feedback', String(t('Verification said incomplete; re-injecting feedback', '검증 결과 미완료; 피드백을 재주입'))],
+            ['✅ Loop complete — task verified as done.', String(t('Verification said complete; loop ends', '검증 결과 완료; 루프 종료'))],
+            ['⚠️ Loop limit reached. Remaining issue: ...', String(t('Hit the iteration cap before completion', '완료 전에 반복 한도 도달'))],
+            ['⚠️ Loop verification failed: ...', String(t('The verify step itself errored; loop aborted', '검증 단계 자체에서 오류; 루프 중단'))],
+          ]}
+        />
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('Stopping a Loop', '루프 중단하기')}
+        </h3>
+        <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
+          <li>{t(<><IC>/stop</IC> — cancels the current iteration and the loop. The verifier will not re-inject after stop.</>, <><IC>/stop</IC> — 현재 반복과 루프를 모두 취소합니다. 중단 후 검증기는 재주입하지 않습니다.</>)}</li>
+          <li>{t(<><IC>/stopall</IC> — same, plus clears any queued messages.</>, <><IC>/stopall</IC> — 위와 같으며 추가로 모든 큐 메시지를 비웁니다.</>)}</li>
+          <li>{t(<><IC>/clear</IC> — also clears loop state along with the session.</>, <><IC>/clear</IC> — 세션과 함께 루프 상태도 초기화합니다.</>)}</li>
+        </ul>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('Tips', '팁')}
+        </h3>
+        <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
+          <li>{t(
+            <><IC>/loop 0</IC> (unlimited) is powerful but has no built-in safety net. Pair it with a clear stopping criterion in the request itself (e.g., "until the test command exits 0").</>,
+            <><IC>/loop 0</IC>(무한)은 강력하지만 안전 장치가 내장되어 있지 않습니다. 요청 자체에 명확한 종료 조건을 함께 명시하세요(예: "테스트 명령이 0으로 종료될 때까지").</>
+          )}</li>
+          <li>{t(
+            <>Each iteration is a real Claude turn — token cost scales with iteration count. Each loop iteration costs roughly <strong className="text-zinc-300">1 task turn + 1 verify turn</strong>.</>,
+            <>매 반복은 실제 Claude 턴입니다 — 토큰 비용은 반복 횟수에 비례합니다. 매 루프 반복은 대략 <strong className="text-zinc-300">1 작업 턴 + 1 검증 턴</strong>의 비용이 듭니다.</>
+          )}</li>
+        </ul>
+      </SubSection>
+
+      <SubSection title={String(t('End Hook — Notification When Processing Completes', '엔드 훅 — 처리 완료 알림'))}>
+        <P>{t(
+          <>The end hook is a custom message the bot sends as a separate Telegram message every time an AI request finishes. Useful as a ping when you walk away from a long-running task.</>,
+          <>엔드 훅은 AI 요청이 끝날 때마다 봇이 별도의 Telegram 메시지로 보내는 사용자 정의 알림입니다. 오래 걸리는 작업을 띄워두고 자리를 비울 때 완료 시점을 알려주는 용도로 유용합니다.</>
+        )}</P>
+        <CommandTable
+          headers={[String(t('Command', '명령어')), String(t('Description', '설명'))]}
+          rows={[
+            ['/setendhook <message>', String(t('Set the end hook message for this chat', '이 채팅의 엔드 훅 메시지를 설정'))],
+            ['/setendhook', String(t('Show the currently configured end hook (or report none)', '현재 설정된 엔드 훅을 표시 (없으면 그렇게 안내)'))],
+            ['/setendhook_clear', String(t('Remove the end hook for this chat', '이 채팅의 엔드 훅 제거'))],
+          ]}
+        />
+        <P>{t(
+          <>Example: <IC>/setendhook ✅ Done</IC> — after every successful completion, the bot will send <IC>✅ Done</IC> as a follow-up message right after the AI's response.</>,
+          <>예: <IC>/setendhook ✅ Done</IC> — 매번 정상적으로 완료될 때마다 봇이 AI 응답 직후에 <IC>✅ Done</IC>을 후속 메시지로 보냅니다.</>
+        )}</P>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('When it fires', '발송 시점')}
+        </h3>
+        <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
+          <li>{t('After every normal AI response completes', '일반 AI 응답이 완료된 후')}</li>
+          <li>{t('After shell command execution finishes', '셸 명령 실행이 끝난 후')}</li>
+          <li>{t('After scheduled tasks complete', '스케줄된 작업이 완료된 후')}</li>
+          <li>{t('After bot-to-bot messages complete', '봇 간 메시지가 완료된 후')}</li>
+        </ul>
+        <h3 className="text-lg font-semibold text-white mt-6 mb-3">
+          {t('When it does NOT fire', '발송되지 않는 경우')}
+        </h3>
+        <ul className="list-disc list-inside space-y-2 text-zinc-400 my-4 ml-2">
+          <li>{t(<>When the request is cancelled with <IC>/stop</IC> or <IC>/stopall</IC></>, <>요청이 <IC>/stop</IC> 또는 <IC>/stopall</IC>으로 취소된 경우</>)}</li>
+          <li>{t('When no end hook is configured for the chat', '해당 채팅에 엔드 훅이 설정되어 있지 않은 경우')}</li>
+        </ul>
+        <P>{t(
+          <>The end hook is stored <strong>per chat</strong>, so different chats can use different markers. Combine with mobile push notifications and the bot becomes a long-task pager.</>,
+          <>엔드 훅은 <strong>채팅별</strong>로 저장되므로 채팅마다 다른 표식을 쓸 수 있습니다. 모바일 푸시 알림과 결합하면 봇이 장시간 작업의 호출기 역할을 해냅니다.</>
+        )}</P>
+      </SubSection>
     </div>
   )
 }

@@ -30,8 +30,8 @@ export default function MultipleChats() {
           </StepItem>
           <StepItem number={4} title={String(t('Disable shared context', '공유 컨텍스트 비활성화'))}>
             {t(
-              <>Send <IC>/context 0</IC> to disable shared context. The AI won't see other bots' messages.</>,
-              <><IC>/context 0</IC>을 전송하여 공유 컨텍스트를 비활성화하세요. AI가 다른 봇의 메시지를 보지 않습니다.</>
+              <>Send <IC>/contextlevel 0</IC> to disable shared context. The AI won't see other bots' messages.</>,
+              <><IC>/contextlevel 0</IC>을 전송하여 공유 컨텍스트를 비활성화하세요. AI가 다른 봇의 메시지를 보지 않습니다.</>
             )}
           </StepItem>
           <StepItem number={5} title={String(t('Start working', '작업 시작'))}>

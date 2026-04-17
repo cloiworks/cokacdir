@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn test_display_width_suffix() {
         assert_eq!(display_width_suffix("abcdef", 3), "def");
-        // CJK: "한글test" → 뒤에서 5칸 = "test" (4칸)... '글'=2칸 넣으면 6칸 초과 → "test"
-        assert_eq!(display_width_suffix("한글test", 5), "ltest");
+        // CJK: "한글test" → 뒤에서 5칸: "test"(4칸)은 OK, '글'(2칸) 추가 시 6칸 초과 → "test"
+        assert_eq!(display_width_suffix("한글test", 5), "test");
     }
 }

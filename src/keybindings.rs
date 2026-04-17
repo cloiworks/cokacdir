@@ -1276,7 +1276,8 @@ mod tests {
             kb.panel_action(KeyCode::Char('D'), KeyModifiers::CONTROL | KeyModifiers::SHIFT),
             Some(PanelAction::Quit)
         );
-        assert_eq!(kb.panel_action(KeyCode::Char('d'), KeyModifiers::NONE), None);
+        // Plain 'd' must NOT match ctrl+shift+d binding (default SortByDate for 'd' is expected)
+        assert_ne!(kb.panel_action(KeyCode::Char('d'), KeyModifiers::NONE), Some(PanelAction::Quit));
     }
 
     // -- ActionMap generic reusability test --

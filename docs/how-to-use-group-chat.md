@@ -103,39 +103,39 @@ Bots in a group chat do not work simultaneously. They process messages one at a 
 
 ---
 
-## /context — Controlling Shared Awareness
+## /contextlevel — Controlling Shared Awareness
 
-### What /context does
+### What /contextlevel does
 
 In a group chat, each bot only sees its **own** conversation history by default — Telegram does not let one bot read another bot's messages. To solve this, the server maintains a **shared chat log** that records every message handled by every bot in the group (both the user requests they received and the responses they produced).
 
-The `/context` command controls how many of the most recent entries from that shared log are embedded into the bot's system prompt before each turn. This is the mechanism that lets bots "know" what the other bots in the group have recently said and done.
+The `/contextlevel` command controls how many of the most recent entries from that shared log are embedded into the bot's system prompt before each turn. This is the mechanism that lets bots "know" what the other bots in the group have recently said and done.
 
 ```
-/context        → show current setting
-/context 20     → include the last 20 log entries
-/context 0      → disable shared context entirely
+/contextlevel        → show current setting
+/contextlevel 20     → include the last 20 log entries
+/contextlevel 0      → disable shared context entirely
 ```
 
-The default is **12** entries. Each bot has its own `/context` setting, so you can configure them individually using `@botname /context <n>`.
+The default is **12** entries. Each bot has its own `/contextlevel` setting, so you can configure them individually using `@botname /contextlevel <n>`.
 
 ### Why this matters for token usage
 
-Every log entry included via `/context` is prepended to the bot's prompt on **every turn**. That means:
+Every log entry included via `/contextlevel` is prepended to the bot's prompt on **every turn**. That means:
 
-- A higher `/context` value → the bot sees more of what other bots are doing → better coordination, but every turn sends more tokens to the AI provider.
-- With multiple bots in the same group all running with a non-zero `/context`, token usage multiplies: each bot independently pulls the shared log into its own prompt, so the same conversation content is billed once per bot per turn.
+- A higher `/contextlevel` value → the bot sees more of what other bots are doing → better coordination, but every turn sends more tokens to the AI provider.
+- With multiple bots in the same group all running with a non-zero `/contextlevel`, token usage multiplies: each bot independently pulls the shared log into its own prompt, so the same conversation content is billed once per bot per turn.
 - Long, active group chats with several cooperating bots can therefore consume tokens significantly faster than a 1:1 chat with a single bot.
 
-Tune `/context` based on how much cross-bot awareness you actually need. If the bots rarely need to know what each other are doing, a low value (or `0`) is cheaper and often works just as well.
+Tune `/contextlevel` based on how much cross-bot awareness you actually need. If the bots rarely need to know what each other are doing, a low value (or `0`) is cheaper and often works just as well.
 
-### When to use /context 0
+### When to use /contextlevel 0
 
-Setting `/context` to `0` disables shared context entirely. The bot will have no visibility into what other bots in the group have said — it behaves as if it were alone in the chat, even though other bots remain present.
+Setting `/contextlevel` to `0` disables shared context entirely. The bot will have no visibility into what other bots in the group have said — it behaves as if it were alone in the chat, even though other bots remain present.
 
-**If you want to use only a single bot in a group chat, always run `/context 0` on that bot.** There is no other bot to coordinate with, so the shared log would only add useless tokens to every prompt. Turning it off removes that overhead completely and keeps each turn as cheap as a plain 1:1 chat.
+**If you want to use only a single bot in a group chat, always run `/contextlevel 0` on that bot.** There is no other bot to coordinate with, so the shared log would only add useless tokens to every prompt. Turning it off removes that overhead completely and keeps each turn as cheap as a plain 1:1 chat.
 
-`/context 0` is also the right choice when you deliberately want multiple bots to work independently in the same group without influencing each other.
+`/contextlevel 0` is also the right choice when you deliberately want multiple bots to work independently in the same group without influencing each other.
 
 ---
 

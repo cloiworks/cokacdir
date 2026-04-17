@@ -824,6 +824,23 @@ fn copy_dir_recursive_inner(
         let metadata = fs::symlink_metadata(&src_path)?;
 
         if metadata.is_symlink() {
+            // Reject symlinks pointing to sensitive system paths
+            #[cfg(unix)]
+            if let Ok(resolved) = src_path.canonicalize().map(strip_unc_prefix) {
+                let resolved_str = resolved.to_string_lossy();
+                for sensitive in SENSITIVE_PATHS {
+                    if resolved_str.starts_with(sensitive) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "Symlink '{}' points to sensitive system path: {}",
+                                src_path.display(),
+                                resolved_str
+                            ),
+                        ));
+                    }
+                }
+            }
             // Copy symlink as-is (don't follow it)
             #[cfg(unix)]
             {

@@ -784,6 +784,135 @@ pub fn extract_result_summary(session_id: &str, working_dir: &str, model: Option
     result
 }
 
+/// Verify whether a session's task has been fully completed.
+/// Forks the session, asks Claude to judge completeness, and returns the result.
+pub fn verify_completion(session_id: &str, working_dir: &str) -> Result<VerifyResult, String> {
+    debug_log("=== verify_completion START ===");
+    debug_log(&format!("  session_id: {}", session_id));
+    debug_log(&format!("  working_dir: {}", working_dir));
+
+    if !is_valid_session_id(session_id) {
+        debug_log("  ERROR: Invalid session ID format");
+        return Err("Invalid session ID format".to_string());
+    }
+
+    let claude_bin = get_claude_path()
+        .ok_or_else(|| {
+            debug_log("  ERROR: Claude CLI not found");
+            "Claude CLI not found".to_string()
+        })?;
+    debug_log(&format!("  claude_bin: {}", claude_bin));
+
+    let args = vec![
+        "-p",
+        "--dangerously-skip-permissions",
+        "--no-session-persistence",
+        "--max-turns", "1",
+        "--tools", "",
+        "--resume", session_id,
+        "--fork-session",
+    ];
+    debug_log(&format!("  args: {:?}", args));
+
+    let verify_prompt = "Review the task that was just performed in this session. \
+        Check whether the task has been fully, correctly, and safely completed. \
+        Do NOT use any tools — judge based on the conversation history only. \
+        If everything is complete and correct, respond with ONLY the word: mission_complete \
+        If something is missing, incomplete, or incorrect, include the keyword: mission_pending \
+        then describe specifically what still needs to be done. \
+        Do NOT repeat what was already done. Only describe the remaining work.";
+
+    debug_log("  Spawning Claude process...");
+    let spawn_start = std::time::Instant::now();
+    let mut child = Command::new(&claude_bin)
+        .args(&args)
+        .current_dir(working_dir)
+        .env("PATH", enhanced_path_for_bin(&claude_bin))
+        .env_remove("CLAUDECODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: Failed to spawn: {}", e));
+            format!("Failed to start Claude for verify_completion: {}", e)
+        })?;
+    debug_log(&format!("  Process spawned in {:?}, pid={:?}", spawn_start.elapsed(), child.id()));
+
+    if let Some(mut stdin) = child.stdin.take() {
+        debug_log("  Writing verify_prompt to stdin...");
+        let write_result = stdin.write_all(verify_prompt.as_bytes());
+        debug_log(&format!("  stdin write result: {:?}", write_result.is_ok()));
+        drop(stdin);
+        debug_log("  stdin dropped (closed)");
+    } else {
+        debug_log("  WARNING: Could not get stdin handle");
+    }
+
+    debug_log("  Waiting for process to complete...");
+    let wait_start = std::time::Instant::now();
+    let output = child.wait_with_output()
+        .map_err(|e| {
+            debug_log(&format!("  ERROR: wait_with_output failed after {:?}: {}", wait_start.elapsed(), e));
+            format!("Failed to read verify_completion output: {}", e)
+        })?;
+    debug_log(&format!("  Process completed in {:?}", wait_start.elapsed()));
+    debug_log(&format!("  exit status: {:?}", output.status));
+    debug_log(&format!("  stdout len: {} bytes", output.stdout.len()));
+    debug_log(&format!("  stderr len: {} bytes", output.stderr.len()));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
+        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
+        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        return Err(format!("verify_completion process failed (exit {:?}). stderr: {}",
+            output.status.code(), stderr));
+    }
+    debug_log("  Process exit status: success");
+
+    let response_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let preview: String = response_text.chars().take(300).collect();
+    debug_log(&format!("  response preview: {}", preview));
+
+    if response_text.trim().is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        debug_log(&format!("  ERROR: Empty response. exit={:?}, stderr: {}", output.status.code(), &stderr[..stderr.len().min(500)]));
+        return Err(format!("verify_completion returned empty (exit {:?}). stderr: {}", output.status.code(), stderr));
+    }
+
+    // Treat as complete only when "mission_complete" is present AND
+    // "mission_pending" is absent. If both keywords coexist (LLM ambiguity),
+    // err on the side of treating it as incomplete so feedback is consumed.
+    let pending = response_text.contains("mission_pending");
+    let complete = response_text.contains("mission_complete") && !pending;
+    let feedback = if complete {
+        None
+    } else {
+        // Strip verification keywords from feedback before returning.
+        // This text is sent back to Claude as the next prompt, so it should
+        // contain only the description of remaining work.
+        let cleaned = response_text
+            .replace("mission_pending", "")
+            .replace("mission_complete", "");
+        let cleaned = cleaned.trim();
+        if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
+    };
+
+    debug_log(&format!("  complete={}, feedback={:?}", complete, feedback.as_ref().map(|s| &s[..s.len().min(200)])));
+    debug_log("=== verify_completion END ===");
+
+    Ok(VerifyResult { complete, feedback })
+}
+
+/// Result of verify_completion
+#[derive(Debug, Clone)]
+pub struct VerifyResult {
+    pub complete: bool,
+    pub feedback: Option<String>,
+}
+
 /// Check if Claude CLI is available
 pub fn is_claude_available() -> bool {
     get_claude_path().is_some()

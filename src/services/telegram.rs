@@ -1574,6 +1574,18 @@ fn version_is_newer(a: &str, b: &str) -> bool {
     va > vb
 }
 
+/// State for /loop command: self-verification loop
+struct LoopState {
+    /// The original user request
+    original_request: String,
+    /// Maximum iterations (user-specified or default)
+    max_iterations: u16,
+    /// Remaining verification attempts before giving up
+    remaining: u16,
+}
+
+const LOOP_MAX_ITERATIONS: u16 = 5;
+
 /// A message queued while AI is busy (queue mode ON)
 struct QueuedMessage {
     /// Short hex ID for user-facing reference (e.g. "A394FDA")
@@ -1618,6 +1630,10 @@ struct SharedData {
     bot_display_name: String,
     /// API base URL (default: "https://api.telegram.org", bridge: "http://127.0.0.1:<port>")
     api_base_url: String,
+    /// Per-chat loop state for /loop command (self-verification loop)
+    loop_states: HashMap<ChatId, LoopState>,
+    /// Pending loop feedback to re-inject (separate from message_queues to bypass queue mode check)
+    loop_feedback: HashMap<ChatId, (String, String)>,  // (feedback_text, user_display_name)
 }
 
 type SharedState = Arc<Mutex<SharedData>>;
@@ -2248,6 +2264,7 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         teloxide::types::BotCommand::new("stop", "Stop current AI request"),
         teloxide::types::BotCommand::new("stopall", "Stop request and clear queue"),
         teloxide::types::BotCommand::new("queue", "Toggle queue mode"),
+        teloxide::types::BotCommand::new("loop", "Repeat until task is fully completed"),
         teloxide::types::BotCommand::new("down", "Download file from server"),
         teloxide::types::BotCommand::new("public", "Toggle public access (group only)"),
         teloxide::types::BotCommand::new("availabletools", "List all available tools"),
@@ -2260,7 +2277,7 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         teloxide::types::BotCommand::new("envvars", "Show all environment variables"),
         teloxide::types::BotCommand::new("silent", "Toggle silent mode (hide tool calls)"),
         teloxide::types::BotCommand::new("direct", "Toggle direct mode (group only)"),
-        teloxide::types::BotCommand::new("context", "Set group chat log context count"),
+        teloxide::types::BotCommand::new("contextlevel", "Set group chat log context count"),
         teloxide::types::BotCommand::new("query", "Send message to AI (/query@bot for groups)"),
         teloxide::types::BotCommand::new("instruction", "Set system instruction for this chat"),
         teloxide::types::BotCommand::new("instruction_clear", "Clear system instruction"),
@@ -2291,6 +2308,8 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         bot_username: bot_username.clone(),
         bot_display_name: bot_display_name.clone(),
         api_base_url: api_base_url.to_string(),
+        loop_states: HashMap::new(),
+        loop_feedback: HashMap::new(),
     }));
 
     println!("  ✓ Bot connected — Listening for messages");
@@ -3052,10 +3071,10 @@ async fn handle_message(
         msg_debug("[handle_message] routing → /direct");
         println!("  [{timestamp}] ◀ [{user_name}] /direct");
         handle_direct_command(&bot, chat_id, &msg, &state, token, is_owner).await?;
-    } else if text.starts_with("/context") {
-        msg_debug("[handle_message] routing → /context");
-        println!("  [{timestamp}] ◀ [{user_name}] /context {}", text.strip_prefix("/context").unwrap_or("").trim());
-        handle_context_command(&bot, chat_id, &text, &state, token, is_group_chat).await?;
+    } else if text.starts_with("/contextlevel") {
+        msg_debug("[handle_message] routing → /contextlevel");
+        println!("  [{timestamp}] ◀ [{user_name}] /contextlevel {}", text.strip_prefix("/contextlevel").unwrap_or("").trim());
+        handle_contextlevel_command(&bot, chat_id, &text, &state, token, is_group_chat).await?;
     } else if text.starts_with("/query") {
         let body = text.strip_prefix("/query").unwrap_or("").trim();
         if body.is_empty() {
@@ -3066,6 +3085,70 @@ async fn handle_message(
             msg_debug(&format!("[handle_message] routing → text_message (/query), body={:?}", truncate_str(body, 80)));
             println!("  [{timestamp}] ◀ [{user_name}] {body}");
             handle_text_message(&bot, chat_id, body, &state, &user_name, false).await?;
+        }
+    } else if text.starts_with("/loop") {
+        // Strip /loop prefix and handle @botname suffix (e.g. /loop@botname request)
+        let body = text.strip_prefix("/loop").unwrap_or("");
+        let body = if body.starts_with('@') {
+            body.find(' ').map(|i| &body[i..]).unwrap_or("").trim()
+        } else {
+            body.trim()
+        };
+        if body.is_empty() {
+            msg_debug("[handle_message] /loop with empty body");
+            shared_rate_limit_wait(&state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "Usage: /loop [N] <request>\nRepeats until the task is fully completed.\nOptional: N = max iterations (default 5, 0 = unlimited)").await)?;
+        } else {
+            // /loop requires Claude provider (uses --fork-session for verification)
+            let provider = { let _m = get_model(&state.lock().await.settings, chat_id); provider_from_model(_m.as_deref()).to_string() };
+            if provider != "claude" {
+                shared_rate_limit_wait(&state, chat_id).await;
+                tg!("send_message", bot.send_message(chat_id, "/loop requires Claude model (uses --fork-session for verification).").await)?;
+            } else {
+                // Reject if a loop is already running for this chat
+                {
+                    let data = state.lock().await;
+                    if data.loop_states.contains_key(&chat_id) {
+                        drop(data);
+                        shared_rate_limit_wait(&state, chat_id).await;
+                        tg!("send_message", bot.send_message(chat_id, "A loop is already running. Use /stop to cancel it first.").await)?;
+                        return Ok(());
+                    }
+                }
+                // Parse optional iteration count: /loop 10 request → 10 iterations, /loop 0 request → unlimited
+                let (max_iter, request) = {
+                    let mut parts = body.splitn(2, ' ');
+                    let first = parts.next().unwrap_or("");
+                    let rest = parts.next().unwrap_or("").trim();
+                    if !rest.is_empty() {
+                        if let Ok(n) = first.parse::<u16>() {
+                            (n, rest)
+                        } else {
+                            (LOOP_MAX_ITERATIONS, body)
+                        }
+                    } else {
+                        (LOOP_MAX_ITERATIONS, body)
+                    }
+                };
+                msg_debug(&format!("[handle_message] routing → /loop, max_iter={}, request={:?}", max_iter, truncate_str(request, 80)));
+                println!("  [{timestamp}] ◀ [{user_name}] /loop {} {}", max_iter, truncate_str(request, 60));
+                {
+                    let mut data = state.lock().await;
+                    data.loop_states.insert(chat_id, LoopState {
+                        original_request: request.to_string(),
+                        max_iterations: max_iter,
+                        remaining: max_iter,
+                    });
+                }
+                shared_rate_limit_wait(&state, chat_id).await;
+                let iter_label = if max_iter == 0 {
+                    "🔄 Loop started (unlimited)".to_string()
+                } else {
+                    format!("🔄 Loop started (max {} iterations)", max_iter)
+                };
+                let _ = tg!("send_message", bot.send_message(chat_id, &iter_label).await);
+                handle_text_message(&bot, chat_id, request, &state, &user_name, false).await?;
+            }
         }
     } else if text.starts_with("/setendhook_clear") {
         msg_debug("[handle_message] routing → /setendhook_clear");
@@ -3142,6 +3225,7 @@ Manage server files &amp; chat with Claude AI.
 <code>/stop_&lt;ID&gt;</code> — Cancel a specific queued message
 <code>/stopall</code> — Stop request and clear queue
 <code>/queue</code> — Toggle queue mode (queue messages while AI is busy)
+<code>/loop [N] &lt;request&gt;</code> — Repeat until task is fully completed
 
 <b>File Transfer</b>
 <code>/down &lt;file&gt;</code> — Download file from server
@@ -3169,7 +3253,7 @@ AI can read, edit, and run commands in your session.
 <code>/public on</code> — Allow all members to use bot
 <code>/public off</code> — Owner only (default)
 <code>/direct</code> — Toggle direct mode (no ; prefix needed)
-<code>/context &lt;N&gt;</code> — Set group chat log entries in prompt (0=off, default 12)
+<code>/contextlevel &lt;N&gt;</code> — Set group chat log entries in prompt (0=off, default 12)
 
 <b>Schedule</b>
 Ask in natural language to manage schedules.
@@ -4566,6 +4650,8 @@ async fn handle_clear_command(
         let mdl = get_model(&data.settings, chat_id);
         let prov = provider_from_model(mdl.as_deref());
         let stop_msg = data.stop_message_ids.remove(&chat_id);
+        data.loop_states.remove(&chat_id);
+        data.loop_feedback.remove(&chat_id);
         let uname = data.bot_username.clone();
         let dname = data.bot_display_name.clone();
         (path, prov.to_string(), stop_msg, uname, dname)
@@ -4732,6 +4818,13 @@ async fn handle_stop_command(
             // claude::execute to pass its cancelled check and start an API request.
             token.cancelled.store(true, Ordering::Relaxed);
 
+            // Clear loop state so verification loop doesn't continue after stop
+            {
+                let mut data = state.lock().await;
+                data.loop_states.remove(&chat_id);
+                data.loop_feedback.remove(&chat_id);
+            }
+
             // Kill child process directly to unblock reader.lines()
             // When the child dies, its stdout pipe closes → reader returns EOF → blocking thread exits
             if let Ok(guard) = token.child_pid.lock() {
@@ -4841,11 +4934,13 @@ async fn handle_stopall_command(
     chat_id: ChatId,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    // Clear the message queue, get cancel token, and set cancelled flag atomically
+    // Clear the message queue, loop state, get cancel token, and set cancelled flag atomically
     // to prevent a new message from being queued between queue clear and cancellation
     let (queue_len, token, already_cancelled) = {
         let mut data = state.lock().await;
         let q = data.message_queues.remove(&chat_id);
+        data.loop_states.remove(&chat_id);
+        data.loop_feedback.remove(&chat_id);
         let qlen = q.map(|q| q.len()).unwrap_or(0);
         let ct = data.cancel_tokens.get(&chat_id).cloned();
         let was_cancelled = if let Some(ref t) = ct {
@@ -5858,8 +5953,8 @@ async fn handle_direct_command(
     Ok(())
 }
 
-/// Handle /context command - set number of group chat log entries to embed in system prompt
-async fn handle_context_command(
+/// Handle /contextlevel command - set number of group chat log entries to embed in system prompt
+async fn handle_contextlevel_command(
     bot: &Bot,
     chat_id: ChatId,
     text: &str,
@@ -5873,7 +5968,7 @@ async fn handle_context_command(
         return Ok(());
     }
 
-    let arg = text.strip_prefix("/context").unwrap_or("").trim();
+    let arg = text.strip_prefix("/contextlevel").unwrap_or("").trim();
     let key = chat_id.0.to_string();
 
     if arg.is_empty() {
@@ -5884,7 +5979,7 @@ async fn handle_context_command(
         shared_rate_limit_wait(state, chat_id).await;
         tg!("send_message", bot.send_message(chat_id, format!(
             "Group chat log context: <b>{}</b> entries\n\n\
-             <code>/context &lt;N&gt;</code> — Set count (0 to disable)\n\
+             <code>/contextlevel &lt;N&gt;</code> — Set count (0 to disable)\n\
              Default: 12",
             current
         )).parse_mode(teloxide::types::ParseMode::Html).await)?;
@@ -5893,7 +5988,7 @@ async fn handle_context_command(
 
     let Ok(n) = arg.parse::<usize>() else {
         shared_rate_limit_wait(state, chat_id).await;
-        tg!("send_message", bot.send_message(chat_id, "Usage: /context <number>\nExample: /context 20, /context 0 (disable)").await)?;
+        tg!("send_message", bot.send_message(chat_id, "Usage: /contextlevel <number>\nExample: /contextlevel 20, /contextlevel 0 (disable)").await)?;
         return Ok(());
     };
 
@@ -6461,6 +6556,44 @@ async fn handle_model_command(
     Ok(())
 }
 
+/// Dispatch pending loop feedback (stored in loop_feedback HashMap).
+/// Called after loop verification determines the task is incomplete.
+/// Uses the same boxed-future pattern as process_next_queued_message
+/// to satisfy Send bounds (handle_text_message's future is not Send
+/// in the outer tokio::spawn context).
+fn dispatch_loop_feedback<'a>(
+    bot: &'a Bot,
+    chat_id: ChatId,
+    state: &'a SharedState,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        let feedback = {
+            let mut data = state.lock().await;
+            let fb = data.loop_feedback.remove(&chat_id);
+            // Insert placeholder cancel_token so incoming messages see "busy"
+            // during the gap before handle_text_message creates its own token.
+            // Same pattern as process_next_queued_message (line 6628).
+            if fb.is_some() {
+                data.cancel_tokens.insert(chat_id, Arc::new(CancelToken::new()));
+                msg_debug(&format!("[loop:dispatch] chat_id={}, placeholder cancel_token inserted", chat_id.0));
+            }
+            fb
+        };
+        if let Some((text, user_display_name)) = feedback {
+            msg_debug(&format!("[loop:dispatch] chat_id={}, feedback_len={}", chat_id.0, text.len()));
+            // from_queue=true: handle_text_message will overwrite the placeholder
+            // cancel_token instead of treating it as "another task active".
+            if let Err(e) = handle_text_message(bot, chat_id, &text, state, &user_display_name, true).await {
+                msg_debug(&format!("[loop:dispatch] chat_id={}, handle_text_message FAILED: {}", chat_id.0, e));
+            }
+        } else {
+            msg_debug(&format!("[loop:dispatch] chat_id={}, no feedback found (may have been cleared by /stop)", chat_id.0));
+            // Fall through to normal queue processing
+            process_next_queued_message(bot, chat_id, state).await;
+        }
+    })
+}
+
 /// After an AI request finishes (normal completion or cancellation), check the message queue
 /// and process the next queued message if queue mode is enabled.
 /// This must be called AFTER cancel_tokens.remove().
@@ -6896,6 +7029,7 @@ async fn handle_text_message(
         let mut last_edit_text = String::new();
         let mut done = false;
         let mut cancelled = false;
+        let mut loop_reinjected = false;
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
         let mut pending_cokacdir = false;
@@ -7318,6 +7452,132 @@ async fn handle_text_message(
                         let _ = tg!("send_message", bot_owned.send_message(chat_id, &hook_msg).await);
                     }
                 }
+
+                // === /loop verification: fork session and check completeness ===
+                if !cancelled && !cancel_token.cancelled.load(Ordering::Relaxed) && provider_str == "claude" {
+                    let loop_info = {
+                        let data = state_owned.lock().await;
+                        data.loop_states.get(&chat_id).map(|ls| {
+                            let sid = data.sessions.get(&chat_id).and_then(|s| s.session_id.clone());
+                            let cwd = data.sessions.get(&chat_id).and_then(|s| s.current_path.clone()).unwrap_or_default();
+                            (ls.remaining, ls.max_iterations, ls.original_request.clone(), sid, cwd)
+                        })
+                    };
+                    if let Some((remaining, max_iterations, original_request, sid, cwd)) = loop_info {
+                        if let Some(session_id) = sid {
+                            msg_debug(&format!("[loop] verifying: session_id={}, remaining={}, request={:?}",
+                                session_id, remaining, truncate_str(&original_request, 60)));
+                            // Show spinner during verification
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            let verify_msg = tg!("send_message", bot_owned.send_message(chat_id, "🔍 Verifying...").await);
+                            let verify_msg_id = verify_msg.ok().map(|m| m.id);
+                            let sid_clone = session_id.clone();
+                            let cwd_clone = cwd.clone();
+                            let verify_result = tokio::task::spawn_blocking(move || {
+                                crate::services::claude::verify_completion(&sid_clone, &cwd_clone)
+                            }).await;
+                            // Remove spinner
+                            if let Some(msg_id) = verify_msg_id {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+                            }
+                            // Re-check: /stop may have been called during verification
+                            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                                msg_debug("[loop] cancelled during verification — aborting loop");
+                                // loop_states already removed by /stop handler
+                            } else {
+                            match verify_result {
+                                Ok(Ok(result)) => {
+                                    if result.complete {
+                                        msg_debug("[loop] mission_complete — loop finished");
+                                        {
+                                            let mut data = state_owned.lock().await;
+                                            data.loop_states.remove(&chat_id);
+                                        }
+                                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                                        let _ = tg!("send_message", bot_owned.send_message(chat_id, "✅ Loop complete — task verified as done.").await);
+                                    } else if max_iterations > 0 && remaining <= 1 {
+                                        msg_debug("[loop] max iterations reached — loop stopped");
+                                        {
+                                            let mut data = state_owned.lock().await;
+                                            data.loop_states.remove(&chat_id);
+                                        }
+                                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                                        let feedback_preview = result.feedback.as_deref().unwrap_or("(no details)");
+                                        let msg = format!("⚠️ Loop limit reached. Remaining issue:\n{}", feedback_preview);
+                                        let _ = tg!("send_message", bot_owned.send_message(chat_id, &msg).await);
+                                    } else {
+                                        // Incomplete: use feedback if available, otherwise fall back to original request
+                                        let reinject_text = result.feedback.unwrap_or_else(|| {
+                                            format!("Continue the previous task. The original request was: {}", original_request)
+                                        });
+                                        // For unlimited (max_iterations==0): don't decrement, track iteration count separately
+                                        let (new_remaining, iteration) = if max_iterations == 0 {
+                                            // remaining counts UP from 0 for display; never decremented to trigger limit
+                                            (remaining.saturating_add(1), remaining.saturating_add(1))
+                                        } else {
+                                            let nr = remaining - 1;
+                                            (nr, max_iterations - nr)
+                                        };
+                                        msg_debug(&format!("[loop] incomplete — re-requesting (remaining={}): {:?}",
+                                            new_remaining, truncate_str(&reinject_text, 100)));
+                                        let iter_label = if max_iterations == 0 {
+                                            format!("🔄 Loop iteration {}\n{}", iteration, reinject_text)
+                                        } else {
+                                            format!("🔄 Loop iteration {}/{}\n{}", iteration, max_iterations, reinject_text)
+                                        };
+                                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                                        let _ = tg!("send_message", bot_owned.send_message(chat_id, &iter_label).await);
+                                        // Store feedback for dispatch_loop_feedback to pick up.
+                                        // Cannot call handle_text_message directly here because
+                                        // its future is not Send-safe inside tokio::spawn.
+                                        // Re-check cancellation under the lock so /stop arriving
+                                        // between the verify-result check and this insert cannot
+                                        // leave behind a feedback that re-injects after /stop.
+                                        {
+                                            let mut data = state_owned.lock().await;
+                                            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                                                msg_debug("[loop] cancelled during result processing — skip reinject");
+                                            } else {
+                                                if let Some(ls) = data.loop_states.get_mut(&chat_id) {
+                                                    ls.remaining = new_remaining;
+                                                }
+                                                data.loop_feedback.insert(chat_id, (reinject_text, user_display_name_owned.clone()));
+                                                loop_reinjected = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    msg_debug(&format!("[loop] verify_completion error: {}", e));
+                                    {
+                                        let mut data = state_owned.lock().await;
+                                        data.loop_states.remove(&chat_id);
+                                    }
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let _ = tg!("send_message", bot_owned.send_message(chat_id,
+                                        &format!("⚠️ Loop verification failed: {}", e)).await);
+                                }
+                                Err(e) => {
+                                    msg_debug(&format!("[loop] spawn_blocking error: {}", e));
+                                    {
+                                        let mut data = state_owned.lock().await;
+                                        data.loop_states.remove(&chat_id);
+                                    }
+                                }
+                            }
+                            } // else (not cancelled during verification)
+                        } else {
+                            msg_debug("[loop] no session_id available — cannot verify");
+                            {
+                                let mut data = state_owned.lock().await;
+                                data.loop_states.remove(&chat_id);
+                            }
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            let _ = tg!("send_message", bot_owned.send_message(chat_id, "⚠️ Loop stopped — no session ID available for verification.").await);
+                        }
+                    }
+                }
             }
 
             // === Queue processing (both during streaming and after done) ===
@@ -7466,6 +7726,25 @@ async fn handle_text_message(
             msg_debug(&format!("[queue:trigger] chat_id={}, source=text_poll_cancelled", chat_id.0));
             drop(_group_lock); // release group chat lock before processing queue
             process_next_queued_message(&bot_owned, chat_id, &state_owned).await;
+            return;
+        }
+
+        // If loop verification stored feedback, clean up and dispatch it.
+        // Uses dispatch_loop_feedback (bypasses queue mode check, no "Dequeued" noise).
+        // Backstop: if /stop fired after the in-lock check above, drop the dispatch.
+        if loop_reinjected && !cancel_token.cancelled.load(Ordering::Relaxed) {
+            msg_debug("[queue:trigger] loop_reinjected — dispatching loop feedback");
+            let orphan_stop_msg = {
+                let mut data = state_owned.lock().await;
+                data.cancel_tokens.remove(&chat_id);
+                data.stop_message_ids.remove(&chat_id)
+            };
+            if let Some(msg_id) = orphan_stop_msg {
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+            }
+            drop(_group_lock);
+            dispatch_loop_feedback(&bot_owned, chat_id, &state_owned).await;
             return;
         }
 

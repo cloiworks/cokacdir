@@ -81,3 +81,107 @@ When turning queue off, any existing queued messages are cleared.
 | AI busy, queue has messages | Cancels current request; next queued message starts automatically | Cancels current request and clears all queued messages |
 | AI busy, queue empty | Cancels current request | Cancels current request |
 | AI idle, queue has messages | No effect | Clears all queued messages |
+
+---
+
+## Loop — Self-Verification Loop
+
+The `/loop` command keeps running the same task until the bot itself decides the task is fully and correctly completed. After every response, the bot forks the session and asks Claude to judge whether the work is done. If not, it re-injects the remaining work as the next prompt and tries again.
+
+Useful for tasks where one shot is rarely enough — multi-step refactors, "keep trying until tests pass", "fix everything the linter reports", and similar.
+
+### Usage
+
+```
+/loop <request>           → repeat up to 5 times (default)
+/loop <N> <request>       → repeat up to N times
+/loop 0 <request>         → repeat with no upper bound (use with care)
+```
+
+Examples:
+
+```
+/loop fix all clippy warnings in the project
+/loop 10 add unit tests until coverage is above 90%
+/loop 0 keep trying until the build passes
+```
+
+### Requirements
+
+- **Claude model only.** `/loop` uses `--fork-session` for verification, which is Claude-specific. Other providers will be rejected with a message.
+- **One loop per chat at a time.** If a loop is already running, a new `/loop` is rejected. Use `/stop` to cancel the current loop first.
+
+### What You'll See
+
+| Message | Meaning |
+|---------|---------|
+| `🔄 Loop started (max N iterations)` | Loop has begun |
+| `🔄 Loop started (unlimited)` | Started in `/loop 0` mode |
+| `🔍 Verifying...` | Bot is forking the session to judge completeness |
+| `🔄 Loop iteration K/N` followed by feedback | Verification said incomplete; re-injecting feedback |
+| `✅ Loop complete — task verified as done.` | Verification said complete; loop ends |
+| `⚠️ Loop limit reached. Remaining issue: ...` | Hit the iteration cap before completion |
+| `⚠️ Loop verification failed: ...` | The verify step itself errored; loop aborted |
+
+### Stopping a Loop
+
+- `/stop` — cancels the current iteration **and** the loop. The verifier will not re-inject after stop.
+- `/stopall` — same, plus clears any queued messages.
+- `/clear` — also clears loop state along with the session.
+
+### How It Works (Brief)
+
+1. Your `<request>` is sent as a normal message.
+2. After the response completes, the bot spawns a verifier Claude with the session forked, no tools, single turn, and a prompt asking for either `mission_complete` or `mission_pending: <what's left>`.
+3. If the answer is `mission_complete` (and not also `mission_pending`), the loop ends.
+4. Otherwise, the remaining work text is sent back as the next user prompt, and the cycle repeats.
+5. Once the iteration cap is reached or `/stop` fires, the loop terminates.
+
+### Tips
+
+- `/loop 0` (unlimited) is powerful but has no built-in safety net. Pair it with a clear stopping criterion in the request itself ("until the test command exits 0").
+- Each iteration is a real Claude turn — token cost scales with iteration count.
+- The verification step is also a Claude call (single turn, no tools), so each loop iteration costs roughly **1 task turn + 1 verify turn**.
+
+---
+
+## End Hook — Notification When Processing Completes
+
+The end hook is a custom message that the bot sends as a separate Telegram message every time an AI request finishes. Useful as an alert when you walk away from a long-running task and want a ping when it's done.
+
+### /setendhook \<message\>
+
+Sets the end hook message for the current chat.
+
+```
+/setendhook ✅ Done
+/setendhook @mention please review
+```
+
+The text is stored per chat. After every successful completion, the bot will send this exact message right after the AI's response.
+
+### /setendhook
+
+Without arguments, shows the currently configured end hook (or reports that none is set).
+
+### /setendhook_clear
+
+Removes the end hook for the current chat.
+
+### When the End Hook Fires
+
+- After every normal AI response completes
+- After shell command execution finishes
+- After scheduled tasks complete
+- After bot-to-bot messages complete
+
+### When the End Hook Does NOT Fire
+
+- When the request is cancelled with `/stop` or `/stopall`
+- When no end hook is configured for the chat
+
+### Tips
+
+- Use a short, distinctive marker (an emoji, a tag) so notifications stand out in your Telegram notification feed.
+- The end hook is per chat, so different group chats or DMs can have different markers.
+- Combining `/setendhook` with mobile push notifications turns the bot into a long-task pager.

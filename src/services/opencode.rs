@@ -136,7 +136,7 @@ pub fn verify_completion_opencode(session_id: &str, working_dir: &str) -> Result
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(format!(
             "verify_completion_opencode process failed (exit {:?}). stderr: {}",
-            output.status.code(), &stderr[..stderr.len().min(500)]));
+            output.status.code(), crate::services::claude::safe_preview(&stderr, 500)));
     }
 
     // OpenCode default format writes ONLY the agent's reply to stdout (the
@@ -150,7 +150,7 @@ pub fn verify_completion_opencode(session_id: &str, working_dir: &str) -> Result
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(format!(
             "verify_completion_opencode produced empty reply. stderr: {}",
-            &stderr[..stderr.len().min(500)]));
+            crate::services::claude::safe_preview(&stderr, 500)));
     }
 
     // Same decision rule as claude::verify_completion: complete iff

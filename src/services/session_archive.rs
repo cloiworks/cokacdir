@@ -234,7 +234,9 @@ pub fn build_verification_transcript(session_id: &str) -> Result<String, String>
         }
 
         if out.len() > TOTAL_LIMIT {
-            out.truncate(TOTAL_LIMIT);
+            let mut end = TOTAL_LIMIT;
+            while end > 0 && !out.is_char_boundary(end) { end -= 1; }
+            out.truncate(end);
             out.push_str("\n[...transcript truncated...]\n");
             break;
         }

@@ -215,7 +215,7 @@ pub fn verify_completion_codex(session_id: &str, working_dir: &str) -> Result<cr
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(format!(
             "verify_completion_codex process failed (exit {:?}). stderr: {}",
-            output.status.code(), &stderr[..stderr.len().min(500)]));
+            output.status.code(), crate::services::claude::safe_preview(&stderr, 500)));
     }
 
     // 4. Extract the model's final response. --output-last-message gives us
@@ -227,7 +227,7 @@ pub fn verify_completion_codex(session_id: &str, working_dir: &str) -> Result<cr
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             return Err(format!(
                 "verify_completion_codex produced no last-message output. stderr: {}",
-                &stderr[..stderr.len().min(500)]));
+                crate::services::claude::safe_preview(&stderr, 500)));
         }
     };
     codex_debug_log(&format!("  last_message len={}, preview: {}",
@@ -248,7 +248,7 @@ pub fn verify_completion_codex(session_id: &str, working_dir: &str) -> Result<cr
     };
 
     codex_debug_log(&format!("  complete={}, feedback={:?}",
-        complete, feedback.as_ref().map(|s| &s[..s.len().min(200)])));
+        complete, feedback.as_ref().map(|s| crate::services::claude::safe_preview(s, 200))));
     codex_debug_log("=== verify_completion_codex END ===");
 
     Ok(crate::services::claude::VerifyResult { complete, feedback })
@@ -954,4 +954,3 @@ fn extract_text_content(item: &Value) -> String {
 
     String::new()
 }
-

@@ -17,6 +17,11 @@ fn simple_uuid() -> String {
 /// Global debug flag — toggled by /debug command or COKACDIR_DEBUG=1 env var
 pub static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Build a UTF-8-safe preview string capped at `max_chars` characters.
+pub fn safe_preview(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 /// Initialize debug flag from environment variable or bot_settings.json (call once at startup)
 pub fn init_debug_from_env() {
     if std::env::var("COKACDIR_DEBUG").map(|v| v == "1").unwrap_or(false) {
@@ -630,10 +635,10 @@ pub fn extract_context_summary(session_id: &str, schedule_prompt: &str, working_
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
-        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
-        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        debug_log(&format!("  stderr: {}", safe_preview(&stderr, 500)));
+        debug_log(&format!("  stdout: {}", safe_preview(&stdout, 500)));
         return Err(format!("Context summary process failed (exit {:?}). stderr: {}",
-            output.status.code(), stderr));
+            output.status.code(), safe_preview(&stderr, 500)));
     }
     debug_log("  Process exit status: success");
 
@@ -649,8 +654,8 @@ pub fn extract_context_summary(session_id: &str, schedule_prompt: &str, working_
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            debug_log(&format!("  ERROR: Empty response. stderr: {}", &stderr[..stderr.len().min(500)]));
-            format!("Context summary extraction returned empty. stderr: {}", stderr)
+            debug_log(&format!("  ERROR: Empty response. stderr: {}", safe_preview(&stderr, 500)));
+            format!("Context summary extraction returned empty. stderr: {}", safe_preview(&stderr, 500))
         });
 
     match &result {
@@ -748,10 +753,10 @@ pub fn extract_result_summary(session_id: &str, working_dir: &str, model: Option
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
-        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
-        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        debug_log(&format!("  stderr: {}", safe_preview(&stderr, 500)));
+        debug_log(&format!("  stdout: {}", safe_preview(&stdout, 500)));
         return Err(format!("Result summary process failed (exit {:?}). stderr: {}",
-            output.status.code(), stderr));
+            output.status.code(), safe_preview(&stderr, 500)));
     }
     debug_log("  Process exit status: success");
 
@@ -767,8 +772,8 @@ pub fn extract_result_summary(session_id: &str, working_dir: &str, model: Option
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            debug_log(&format!("  ERROR: Empty response. stderr: {}", &stderr[..stderr.len().min(500)]));
-            format!("Result summary extraction returned empty. stderr: {}", stderr)
+            debug_log(&format!("  ERROR: Empty response. stderr: {}", safe_preview(&stderr, 500)));
+            format!("Result summary extraction returned empty. stderr: {}", safe_preview(&stderr, 500))
         });
 
     match &result {
@@ -884,10 +889,10 @@ pub fn verify_completion(session_id: &str, working_dir: &str) -> Result<VerifyRe
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         debug_log(&format!("  ERROR: Process failed. exit_code={:?}", output.status.code()));
-        debug_log(&format!("  stderr: {}", &stderr[..stderr.len().min(500)]));
-        debug_log(&format!("  stdout: {}", &stdout[..stdout.len().min(500)]));
+        debug_log(&format!("  stderr: {}", safe_preview(&stderr, 500)));
+        debug_log(&format!("  stdout: {}", safe_preview(&stdout, 500)));
         return Err(format!("verify_completion process failed (exit {:?}). stderr: {}",
-            output.status.code(), stderr));
+            output.status.code(), safe_preview(&stderr, 500)));
     }
     debug_log("  Process exit status: success");
 
@@ -897,8 +902,8 @@ pub fn verify_completion(session_id: &str, working_dir: &str) -> Result<VerifyRe
 
     if response_text.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        debug_log(&format!("  ERROR: Empty response. exit={:?}, stderr: {}", output.status.code(), &stderr[..stderr.len().min(500)]));
-        return Err(format!("verify_completion returned empty (exit {:?}). stderr: {}", output.status.code(), stderr));
+        debug_log(&format!("  ERROR: Empty response. exit={:?}, stderr: {}", output.status.code(), safe_preview(&stderr, 500)));
+        return Err(format!("verify_completion returned empty (exit {:?}). stderr: {}", output.status.code(), safe_preview(&stderr, 500)));
     }
 
     // Treat as complete only when "mission_complete" is present AND
@@ -919,7 +924,8 @@ pub fn verify_completion(session_id: &str, working_dir: &str) -> Result<VerifyRe
         if cleaned.is_empty() { None } else { Some(cleaned.to_string()) }
     };
 
-    debug_log(&format!("  complete={}, feedback={:?}", complete, feedback.as_ref().map(|s| &s[..s.len().min(200)])));
+    debug_log(&format!("  complete={}, feedback={:?}",
+        complete, feedback.as_ref().map(|s| safe_preview(s, 200))));
     debug_log("=== verify_completion END ===");
 
     Ok(VerifyResult { complete, feedback })

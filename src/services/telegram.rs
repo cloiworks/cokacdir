@@ -7665,6 +7665,9 @@ async fn handle_text_message(
                                         let mut data = state_owned.lock().await;
                                         data.loop_states.remove(&chat_id);
                                     }
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let _ = tg!("send_message", bot_owned.send_message(chat_id,
+                                        &format!("⚠️ Loop verification failed: {}", e)).await);
                                 }
                             }
                             } // else (not cancelled during verification)

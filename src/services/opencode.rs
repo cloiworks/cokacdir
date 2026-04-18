@@ -82,14 +82,28 @@ pub fn verify_completion_opencode(session_id: &str, working_dir: &str) -> Result
     // context. Spelling out "mission_complete" / "mission_pending" literally
     // is what the parser below looks for.
     let verify_prompt =
-        "Review the conversation you just had. Judge whether the user's \
-         original task has been fully, correctly, and safely completed. \
+        "Review what you just did in this session. \
          Do NOT call any tools, do NOT read files, do NOT run commands — \
-         judge purely from the conversation history visible to you. \
-         Respond with ONLY one of:\n\
-         - `mission_complete` (exactly this single word) if the task is fully done.\n\
-         - `mission_pending` followed by a description of what still needs to be done.\n\
-         Do NOT restate what was already done. Only describe remaining work.";
+         judge purely from the conversation history visible to you.\n\n\
+         If the task appears fully and safely complete, respond with ONLY the single word: mission_complete\n\n\
+         Otherwise respond with: mission_pending\n\
+         followed by ONE short follow-up instruction (1–2 sentences).\n\n\
+         CRITICAL — what this follow-up instruction IS:\n\
+         The text you write after `mission_pending` will be taken verbatim and \
+         delivered as the NEXT USER MESSAGE to the very same working agent that \
+         just performed the task. The agent will read it as if the user typed \
+         it into the chat. Therefore write it as a direct, second-person \
+         request from the user, not as a review/verdict/analysis.\n\n\
+         The instruction should ask the agent to re-examine, re-verify, or \
+         double-check whatever it just did — whatever form that work took. \
+         Let the phrasing flow naturally from the actual work, not from a \
+         fixed template.\n\n\
+         Rules:\n\
+         - Second-person imperative, as the user would type.\n\
+         - NOT a diagnosis, NOT a checklist of missing items, NOT a summary \
+           of what was done.\n\
+         - Match the language of the preceding conversation.\n\
+         - 1–2 sentences. No preface, no \"I think\", no meta commentary.";
 
     // Spawn the fork. No --format flag means plain text; stdin is closed so
     // opencode doesn't block on input.

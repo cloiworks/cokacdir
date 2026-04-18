@@ -814,13 +814,32 @@ pub fn verify_completion(session_id: &str, working_dir: &str) -> Result<VerifyRe
     ];
     debug_log(&format!("  args: {:?}", args));
 
-    let verify_prompt = "Review the task that was just performed in this session. \
-        Check whether the task has been fully, correctly, and safely completed. \
-        Do NOT use any tools — judge based on the conversation history only. \
-        If everything is complete and correct, respond with ONLY the word: mission_complete \
-        If something is missing, incomplete, or incorrect, include the keyword: mission_pending \
-        then describe specifically what still needs to be done. \
-        Do NOT repeat what was already done. Only describe the remaining work.";
+    let verify_prompt = "Review what you just did in this session. \
+        Do NOT use any tools — judge purely from the conversation history. \
+        \
+        If the task appears fully and safely complete, respond with ONLY the single word: mission_complete \
+        \
+        Otherwise respond with: mission_pending \
+        followed by ONE short follow-up instruction (1–2 sentences). \
+        \
+        CRITICAL — what this follow-up instruction IS: \
+        The text you write after `mission_pending` will be taken verbatim and \
+        delivered as the NEXT USER MESSAGE to the very same working agent that \
+        just performed the task. The agent will read it as if the user typed it \
+        into the chat. Therefore write it as a direct, second-person request \
+        from the user, not as a review/verdict/analysis. \
+        \
+        The instruction should ask the agent to re-examine, re-verify, or \
+        double-check whatever it just did — whatever form that work took. \
+        Let the phrasing flow naturally from the actual work, not from a \
+        fixed template. \
+        \
+        Rules: \
+        - Second-person imperative, as the user would type. \
+        - NOT a diagnosis, NOT a checklist of missing items, NOT a summary of \
+          what was done. \
+        - Match the language of the preceding conversation. \
+        - 1–2 sentences. No preface, no \"I think\", no meta commentary.";
 
     debug_log("  Spawning Claude process...");
     let spawn_start = std::time::Instant::now();

@@ -2234,6 +2234,18 @@ impl MessengerBackend for SlackBackend {
             id_raw.unsigned_abs() as i64
         };
 
+        // Seed the bot's own id→name into the user_names cache so that
+        // convert_slack_mentions can translate `<@U_BOT>` into `@<username>`.
+        // Without this, @mentions of the bot in channels leave the raw
+        // `<@U_BOT>` token in the text, which never matches the group-chat
+        // prefix check (`@<bot_username> `) in telegram.rs handle_message —
+        // causing the bot to silently ignore all channel mentions.
+        self.state
+            .user_names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(user_id.clone(), username.clone());
+
         *self.bot_user_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(user_id);
 
         Ok(BotInfo {

@@ -2608,6 +2608,24 @@ impl MessengerBackend for SlackBackend {
         if !resp.status().is_success() {
             return Err(format!("slack download status: {}", resp.status()));
         }
+        // Slack returns 200 + an HTML login page when the bot token lacks
+        // permission (e.g. missing `files:read` scope, or the bot is not a
+        // member of the channel where the file was shared). Detect this so
+        // the downstream consumer doesn't try to parse HTML as image bytes.
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        if ct.starts_with("text/html") {
+            return Err(
+                "slack download returned HTML (bot likely lacks files:read \
+                 scope or is not a member of the channel where the file was \
+                 shared)"
+                    .to_string(),
+            );
+        }
         let bytes = resp
             .bytes()
             .await

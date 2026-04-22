@@ -2057,7 +2057,9 @@ impl SlackState {
     /// Decide which thread_ts to use when sending a message.
     /// Priority:
     ///   1. Explicit reply_to_message_id → resolve its thread root.
-    ///   2. Otherwise, last observed thread_ts in this channel (auto-continue).
+    ///   2. DMs (channel id starts with `D`) → reply inline, never auto-thread.
+    ///   3. Otherwise (public/private channels, mpim) → last observed thread
+    ///      in this channel (auto-continue the user's last thread).
     fn resolve_thread_for_send(
         &self,
         channel: &str,
@@ -2075,6 +2077,11 @@ impl SlackState {
                         .or(Some(slack_ref.ts));
                 }
             }
+        }
+        // In DMs the bot should reply inline — auto-threading there is noisy
+        // and unnecessary since a DM is already a dedicated 1:1 context.
+        if channel.starts_with('D') {
+            return None;
         }
         self.last_thread_per_channel
             .lock()

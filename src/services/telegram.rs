@@ -7293,12 +7293,17 @@ async fn handle_text_message(
                                     }
                                 }
                                 StreamMessage::TaskNotification { summary, .. } => {
+                                    // claude-code emits task_notification for every tool call with
+                                    // summary = the tool's short description ("Probe kobus.co.kr
+                                    // form structure" etc.). Injecting that into full_response made
+                                    // each call land as a standalone "[Task: …]" message in the
+                                    // chat history under the PR #35 500ms polling — visual noise
+                                    // that duplicates what the ⚙️ placeholder already showed live.
+                                    // Keep the summary in raw_entries for audit/debug only.
                                     if !summary.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
-                                        let _fr_before = full_response.len();
-                                        full_response.push_str(&format!("\n[Task: {}]\n", summary));
-                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
-                                            chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
+                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification(suppressed in response): summary={:?}, total={}",
+                                            chat_id.0, truncate_str(&summary, 200), full_response.len()));
                                     }
                                 }
                                 StreamMessage::Done { result, session_id: sid } => {
@@ -9517,12 +9522,13 @@ async fn execute_schedule(
                                 }
                             }
                             StreamMessage::TaskNotification { summary, .. } => {
+                                // See the comment on the handle_text_message polling loop — we
+                                // keep the summary in raw_entries for audit but don't inject it
+                                // into user-visible response text.
                                 if !summary.is_empty() {
                                     raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
-                                    let _fr_before = full_response.len();
-                                    full_response.push_str(&format!("\n[Task: {}]\n", summary));
-                                    sched_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
-                                        chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
+                                    sched_debug(&format!("[fr_trace][{}] +TaskNotification(suppressed in response): summary={:?}, total={}",
+                                        chat_id.0, truncate_str(&summary, 200), full_response.len()));
                                 }
                             }
                             StreamMessage::Done { result, session_id } => {
@@ -10307,12 +10313,13 @@ async fn process_bot_message(
                                 }
                                 StreamMessage::TaskNotification { summary, .. } => {
                                     msg_debug(&format!("[botmsg_poll:{}] TaskNotification: summary_len={}", bmsg_id_for_log, summary.len()));
+                                    // See the comment on the handle_text_message polling loop — we
+                                    // keep the summary in raw_entries for audit but don't inject it
+                                    // into user-visible response text.
                                     if !summary.is_empty() {
                                         raw_entries.push(RawPayloadEntry { tag: "TaskNotification".into(), content: summary.clone() });
-                                        let _fr_before = full_response.len();
-                                        full_response.push_str(&format!("\n[Task: {}]\n", summary));
-                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification: added={}, summary={:?}, total={} (was {})",
-                                            chat_id.0, full_response.len() - _fr_before, truncate_str(&summary, 200), full_response.len(), _fr_before));
+                                        msg_debug(&format!("[fr_trace][{}] +TaskNotification(suppressed in response): summary={:?}, total={}",
+                                            chat_id.0, truncate_str(&summary, 200), full_response.len()));
                                     }
                                 }
                                 StreamMessage::Done { result, session_id: sid } => {

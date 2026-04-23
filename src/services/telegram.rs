@@ -146,6 +146,62 @@ pub fn parse_payload_auto(text: &str) -> Vec<RawPayloadEntry> {
     parse_raw_payload(text)
 }
 
+/// Map a Claude / codex CLI failure to a short Korean summary line so 대표님
+/// sees "rate limit 걸렸습니다" instead of an opaque JSON+stderr dump. None if
+/// we don't recognize the pattern; caller falls back to the raw dump alone.
+fn classify_exec_error(message: &str, stderr: &str) -> Option<&'static str> {
+    let combined = format!("{message}\n{stderr}").to_lowercase();
+    if combined.contains("rate limit") || combined.contains("rate_limit")
+        || combined.contains("too many requests") || combined.contains("429") {
+        Some("⚠️ API 속도 제한에 걸렸습니다. 잠시 후 다시 시도해 주세요.")
+    } else if combined.contains("overloaded") || combined.contains("503") {
+        Some("⚠️ API 서버가 과부하 상태입니다. 잠시 후 다시 시도해 주세요.")
+    } else if combined.contains("usage limit") || combined.contains("usage_limit")
+        || combined.contains("plan limit") || combined.contains("quota") {
+        Some("⚠️ 플랜 사용량 한도에 도달했습니다. 리셋까지 기다려야 합니다.")
+    } else if combined.contains("timed out") || combined.contains("timeout")
+        || combined.contains("deadline exceeded") {
+        Some("⚠️ 응답이 지연돼 타임아웃됐습니다. 다시 시도해 주세요.")
+    } else if combined.contains("unauthorized") || combined.contains("401")
+        || combined.contains("forbidden") || combined.contains("403")
+        || combined.contains("authentication") {
+        Some("⚠️ 인증 문제입니다 — API 키나 로그인 상태를 확인해 주세요.")
+    } else if combined.contains("invalid_request") || combined.contains("invalid request")
+        || combined.contains("bad request") || combined.contains("400") {
+        Some("⚠️ 요청 형식 오류 — 프롬프트 또는 첨부 파일을 다시 확인해 주세요.")
+    } else if combined.contains("connection refused") || combined.contains("connection reset")
+        || combined.contains("dns") || combined.contains("network is unreachable") {
+        Some("⚠️ 네트워크 오류 — 연결 상태를 확인해 주세요.")
+    } else if combined.contains("cli not found") || combined.contains("is not installed")
+        || combined.contains("no such file or directory") {
+        Some("⚠️ CLI 바이너리를 찾지 못했습니다. 설치 상태를 확인해 주세요.")
+    } else {
+        None
+    }
+}
+
+/// Assemble a user-facing error body from a failed Claude/codex execution.
+/// Prepends a friendly Korean summary when the failure matches a known
+/// pattern, then includes the raw message + stdout + stderr for debugging.
+fn format_exec_error_body(
+    message: &str,
+    stdout: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> String {
+    let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout.to_string() };
+    let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr.to_string() };
+    let code_display = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let header = classify_exec_error(message, stderr)
+        .map(|h| format!("{h}\n\n"))
+        .unwrap_or_default();
+    format!(
+        "{header}Error: {message}\n```\nexit code: {code_display}\n\n[stdout]\n{stdout_display}\n\n[stderr]\n{stderr_display}\n```"
+    )
+}
+
 /// Maximum content length before truncation and offloading to a separate file.
 const PAYLOAD_TRUNCATE_LIMIT: usize = 500;
 
@@ -661,18 +717,19 @@ fn read_bot_message(path: &std::path::Path) -> Option<BotMessage> {
     let chat_id_val = v.get("chat_id").and_then(|x| x.as_str());
     let content_val = v.get("content").and_then(|x| x.as_str());
     let created_at = v.get("created_at").and_then(|x| x.as_str());
-    if id.is_none() || from.is_none() || to.is_none() || chat_id_val.is_none() || content_val.is_none() || created_at.is_none() {
-        msg_debug(&format!("[read_bot_message] missing fields: id={}, from={}, to={}, chat_id={}, content={}, created_at={} (path={})",
-            id.is_some(), from.is_some(), to.is_some(), chat_id_val.is_some(), content_val.is_some(), created_at.is_some(), path.display()));
+    let (Some(id), Some(from), Some(to), Some(chat_id_val), Some(content_val), Some(created_at)) =
+        (id, from, to, chat_id_val, content_val, created_at)
+    else {
+        msg_debug(&format!("[read_bot_message] missing fields (path={})", path.display()));
         return None;
-    }
+    };
     let msg = BotMessage {
-        id: id.unwrap().to_string(),
-        from: from.unwrap().to_string(),
-        to: to.unwrap().to_string(),
-        chat_id: chat_id_val.unwrap().to_string(),
-        content: content_val.unwrap().to_string(),
-        created_at: created_at.unwrap().to_string(),
+        id: id.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        chat_id: chat_id_val.to_string(),
+        content: content_val.to_string(),
+        created_at: created_at.to_string(),
         file_path: path.to_path_buf(),
     };
     msg_debug(&format!("[read_bot_message] ok: id={}, from={}, to={}, chat_id={}", msg.id, msg.from, msg.to, msg.chat_id));
@@ -3204,7 +3261,7 @@ async fn handle_message(
             handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
         } }
     } else if text.starts_with('/') && is_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
-        let workspace_id = text[1..].split_whitespace().next().unwrap();
+        let workspace_id = text[1..].split_whitespace().next().unwrap_or_default();
         msg_debug(&format!("[handle_message] routing → workspace_resume: {}", workspace_id));
         println!("  [{timestamp}] ◀ [{user_name}] /{workspace_id}");
         handle_workspace_resume(&bot, chat_id, workspace_id, &state, token).await?;
@@ -6336,12 +6393,13 @@ async fn handle_allowed_command(
     let response_msg = {
         let mut data = state.lock().await;
         let chat_key = chat_id.0.to_string();
-        // Ensure this chat has its own tool list (initialize from defaults if missing)
-        if !data.settings.allowed_tools.contains_key(&chat_key) {
-            let defaults: Vec<String> = DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect();
-            data.settings.allowed_tools.insert(chat_key.clone(), defaults);
-        }
-        let tools = data.settings.allowed_tools.get_mut(&chat_key).unwrap();
+        // Initialize this chat's tool list from defaults if missing, then borrow
+        // mutably in a single lookup — no .unwrap() needed.
+        let tools = data
+            .settings
+            .allowed_tools
+            .entry(chat_key.clone())
+            .or_insert_with(|| DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect());
         let mut results: Vec<String> = Vec::new();
         let mut changed = false;
         for (op, tool_name) in &operations {
@@ -7272,19 +7330,13 @@ async fn handle_text_message(
                                     msg_debug(&format!("[polling] Error: message={}, exit_code={:?}, stdout_len={}, stderr_len={}",
                                         message, exit_code, stdout.len(), stderr.len()));
                                     ai_trace(&format!("[STREAM] Error: message={}, exit_code={:?}, stdout_len={}, stderr_len={}", message, exit_code, stdout.len(), stderr.len()));
-                                    let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
-                                    let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
-                                    let code_display = match exit_code {
-                                        Some(c) => c.to_string(),
-                                        None => "(unknown)".to_string(),
-                                    };
-                                    full_response = format!(
-                                        "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
-                                        message, code_display, stdout_display, stderr_display
-                                    );
-                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
-                                        chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
-                                    raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
+                                    let code_display = exit_code
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "(unknown)".to_string());
+                                    full_response = format_exec_error_body(&message, &stdout, &stderr, exit_code);
+                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, total={}",
+                                        chat_id.0, full_response.len(), full_response.len()));
+                                    raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout, stderr) });
                                     done = true;
                                 }
                             }
@@ -9482,19 +9534,13 @@ async fn execute_schedule(
                                 done = true;
                             }
                             StreamMessage::Error { message, stdout, stderr, exit_code } => {
-                                let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
-                                let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
-                                let code_display = match exit_code {
-                                    Some(c) => c.to_string(),
-                                    None => "(unknown)".to_string(),
-                                };
-                                full_response = format!(
-                                    "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
-                                    message, code_display, stdout_display, stderr_display
-                                );
-                                sched_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
-                                    chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
-                                raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
+                                let code_display = exit_code
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "(unknown)".to_string());
+                                full_response = format_exec_error_body(&message, &stdout, &stderr, exit_code);
+                                sched_debug(&format!("[fr_trace][{}] +Error: set={}, total={}",
+                                    chat_id.0, full_response.len(), full_response.len()));
+                                raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout, stderr) });
                                 had_error = true;
                                 done = true;
                             }
@@ -10280,19 +10326,13 @@ async fn process_bot_message(
                                 StreamMessage::Error { message, stdout, stderr, exit_code } => {
                                     msg_debug(&format!("[botmsg_poll:{}] Error: msg={}, exit_code={:?}, stdout_len={}, stderr_len={}",
                                         bmsg_id_for_log, message, exit_code, stdout.len(), stderr.len()));
-                                    let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
-                                    let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
-                                    let code_display = match exit_code {
-                                        Some(c) => c.to_string(),
-                                        None => "(unknown)".to_string(),
-                                    };
-                                    full_response = format!(
-                                        "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
-                                        message, code_display, stdout_display, stderr_display
-                                    );
-                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, stdout_len={}, stderr_len={}, total={}",
-                                        chat_id.0, full_response.len(), stdout_display.len(), stderr_display.len(), full_response.len()));
-                                    raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout_display, stderr_display) });
+                                    let code_display = exit_code
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "(unknown)".to_string());
+                                    full_response = format_exec_error_body(&message, &stdout, &stderr, exit_code);
+                                    msg_debug(&format!("[fr_trace][{}] +Error: set={}, total={}",
+                                        chat_id.0, full_response.len(), full_response.len()));
+                                    raw_entries.push(RawPayloadEntry { tag: "Error".into(), content: format!("exit_code={}, message={}, stdout={}, stderr={}", code_display, message, stdout, stderr) });
                                     done = true;
                                 }
                             }

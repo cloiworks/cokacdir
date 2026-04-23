@@ -1,9 +1,12 @@
 name: release
 
 # Triggered when the `release` branch advances (direct push or PR merge).
-# Reads the version from Cargo.toml, builds binaries for every supported
-# platform, and publishes them as assets on a GitHub Release tagged
-# `v<version>`. The `cokacctl update` flow reads those assets.
+# Reads the version from Cargo.toml, builds a linux-aarch64 binary, and
+# publishes it as an asset on a GitHub Release tagged `v<version>`.
+# The `cokacctl update` flow on the Oracle Cloud ARM64 VPS reads it.
+#
+# Only linux-aarch64 is built because that's the only target the author
+# actually deploys to. Adding other targets later is one matrix entry away.
 
 on:
   push:
@@ -18,17 +21,14 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  # Grab the version from Cargo.toml once so every downstream job can agree
-  # on the tag / release name. If a release for this version already exists,
-  # every matrix job will still succeed (assets are uploaded with overwrite).
-  version:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.get.outputs.version }}
-      tag: ${{ steps.get.outputs.tag }}
+  release:
+    # GitHub's free ARM64 Linux runner — builds natively, no cross-compile.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - id: get
+
+      - name: Read version from Cargo.toml
+        id: version
         run: |
           v=$(awk -F '"' '/^version *=/ { print $2; exit }' Cargo.toml)
           if [ -z "$v" ]; then
@@ -38,52 +38,23 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "tag=v$v"    >> "$GITHUB_OUTPUT"
 
-  build:
-    needs: version
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   artifact: cokacdir-linux-x86_64,       use_cross: false }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu,  artifact: cokacdir-linux-aarch64,      use_cross: true  }
-          - { os: macos-latest,  target: aarch64-apple-darwin,       artifact: cokacdir-macos-aarch64,      use_cross: false }
-          - { os: macos-latest,  target: x86_64-apple-darwin,        artifact: cokacdir-macos-x86_64,       use_cross: false }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,    artifact: cokacdir-windows-x86_64.exe, use_cross: false }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
-      - name: Install cross (linux-aarch64)
-        if: matrix.use_cross
-        run: |
-          cargo install cross --git https://github.com/cross-rs/cross 
-      - name: Build (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} 
-      - name: Build (cargo)
-        if: ${{ !matrix.use_cross }}
-        run: cargo build --release --target ${{ matrix.target }} 
+      - name: Cargo build --release
+        run: cargo build --release
+
       - name: Stage artifact
-        shell: bash
         run: |
           mkdir -p dist
-          if [[ "${{ matrix.artifact }}" == *.exe ]]; then
-            cp "target/${{ matrix.target }}/release/cokacdir.exe" "dist/${{ matrix.artifact }}"
-          else
-            cp "target/${{ matrix.target }}/release/cokacdir" "dist/${{ matrix.artifact }}"
-          fi
+          cp target/release/cokacdir dist/cokacdir-linux-aarch64
 
-      - name: Upload to release
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: ${{ needs.version.outputs.tag }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name:     ${{ steps.version.outputs.tag }}
           fail_on_unmatched_files: true
-          files: dist/${{ matrix.artifact }}
+          files: dist/cokacdir-linux-aarch64
           generate_release_notes: true
           make_latest: "true"

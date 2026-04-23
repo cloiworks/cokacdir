@@ -981,3 +981,138 @@ fn extract_text_content(item: &Value) -> String {
 
     String::new()
 }
+
+// ─── Image generation via codex `$imagegen` ───────────────────────────────
+//
+// Driven by the /image Telegram command. codex routes the `$imagegen`
+// prefix through its built-in image_gen tool (OpenAI's gpt-image-2),
+// respects the user's ChatGPT OAuth session, and writes the PNG to the
+// path we ask for. If codex can't honor the explicit save path for some
+// reason it falls back to writing into ~/.codex/generated_images/; we
+// handle both cases.
+//
+// No streaming / no cancel token — OpenAI's image endpoint is a single
+// blocking HTTP request. Typical wall time is 20–90 s; we cap at 10 min
+// to survive retry loops (IP-restricted prompts sometimes bounce a few
+// times before giving up).
+
+pub const IMAGE_GEN_TIMEOUT_SECS: u64 = 600;
+
+/// Generate an image via codex and write it to `save_path`.
+///
+/// `prompt` is the user's natural-language request (without the
+/// `$imagegen` prefix — we add it here). `size` is a `WxH` string like
+/// `1024x1024`; default it at the caller if unspecified.
+pub fn generate_image_blocking(
+    prompt: &str,
+    size: &str,
+    save_path: &std::path::Path,
+) -> Result<(), String> {
+    let codex_bin = get_codex_path().ok_or_else(||
+        "Codex CLI not found on PATH. Install it first.".to_string()
+    )?;
+    if let Some(parent) = save_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("mkdir failed: {}", e))?;
+    }
+    let save_str = save_path.to_string_lossy();
+    let compound = format!("$imagegen {prompt}. {size}. {save_str} 로 저장");
+
+    codex_debug_log(&format!(
+        "  [imagegen] bin={}, size={}, save={}, prompt_preview={:?}",
+        codex_bin, size, save_str, crate::services::claude::safe_preview(prompt, 120)
+    ));
+
+    let mut child = Command::new(codex_bin)
+        .args([
+            "exec",
+            "--skip-git-repo-check",
+            "--sandbox", "danger-full-access",
+            "--", &compound,
+        ])
+        .env("PATH", crate::services::claude::enhanced_path_for_bin(codex_bin))
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn codex: {}", e))?;
+
+    let start = std::time::Instant::now();
+    let deadline = std::time::Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = child.wait_with_output()
+                    .map_err(|e| format!("wait_with_output: {}", e))?;
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return Err(format!(
+                        "codex exited with {:?}: {}",
+                        status.code(),
+                        crate::services::claude::safe_preview(&stderr, 400)
+                    ));
+                }
+                break;
+            }
+            Ok(None) => {
+                if start.elapsed() > deadline {
+                    let _ = child.kill();
+                    return Err(format!(
+                        "codex timed out after {}s. Copyrighted characters often cause rejection loops — try describing by features instead.",
+                        IMAGE_GEN_TIMEOUT_SECS
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(format!("try_wait: {}", e)),
+        }
+    }
+
+    if !save_path.exists() {
+        if let Some(home) = dirs::home_dir() {
+            let cache = home.join(".codex").join("generated_images");
+            if cache.exists() {
+                if let Some(latest) = walk_latest_png(&cache) {
+                    codex_debug_log(&format!("  [imagegen] fallback copy from {}", latest.display()));
+                    std::fs::copy(&latest, save_path)
+                        .map_err(|e| format!("copy fallback PNG: {}", e))?;
+                }
+            }
+        }
+    }
+    if !save_path.exists() {
+        return Err("codex finished but no PNG was produced at the expected path".into());
+    }
+    Ok(())
+}
+
+fn walk_latest_png(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if let Some(nested) = walk_latest_png(&p) {
+                if let Ok(meta) = nested.metadata() {
+                    if let Ok(mtime) = meta.modified() {
+                        if best.as_ref().map_or(true, |(t, _)| *t < mtime) {
+                            best = Some((mtime, nested));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if p.extension().and_then(|s| s.to_str()) == Some("png") {
+            if let Ok(meta) = p.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    if best.as_ref().map_or(true, |(t, _)| *t < mtime) {
+                        best = Some((mtime, p));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}

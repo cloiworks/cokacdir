@@ -3078,6 +3078,10 @@ async fn handle_message(
         msg_debug("[handle_message] routing → /greeting");
         println!("  [{timestamp}] ◀ [{user_name}] /greeting {}", text.strip_prefix("/greeting").unwrap_or("").trim());
         handle_greeting_command(&bot, chat_id, &text, &state, token).await?;
+    } else if text.starts_with("/image") {
+        msg_debug("[handle_message] routing → /image");
+        println!("  [{timestamp}] ◀ [{user_name}] /image {}", text.strip_prefix("/image").unwrap_or("").trim());
+        handle_image_command(&bot, chat_id, &text, &state).await?;
     } else if text.starts_with("/debug") {
         msg_debug("[handle_message] routing → /debug");
         println!("  [{timestamp}] ◀ [{user_name}] /debug");
@@ -5967,6 +5971,111 @@ async fn handle_greeting_command(
     };
     shared_rate_limit_wait(state, chat_id).await;
     tg!("send_message", bot.send_message(chat_id, reply).await)?;
+    Ok(())
+}
+
+/// Handle /image command — generate an image via codex `$imagegen` and
+/// send the resulting PNG back to the chat.
+///
+/// Usage:
+///   /image <prompt>
+///   /image <prompt> --size 1024x1024
+///
+/// Size defaults to 1024x1024. Codex uses the user's ChatGPT OAuth session
+/// so no API key is required on the server. Generation blocks the handler
+/// for up to 10 minutes (timeout enforced in codex::generate_image_blocking)
+/// but runs on a spawn_blocking thread so the bot stays responsive for
+/// other chats; we also send a placeholder message up front so the user
+/// knows the request is in flight.
+async fn handle_image_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    let args = text.strip_prefix("/image").unwrap_or("").trim();
+
+    // Parse optional `--size WxH` at the end; default to 1024x1024.
+    let (prompt, size) = {
+        if let Some(idx) = args.rfind("--size") {
+            let (pfx, sfx) = args.split_at(idx);
+            let size_val = sfx.trim_start_matches("--size").trim().to_string();
+            if size_val.chars().all(|c| c.is_ascii_digit() || c == 'x' || c == 'X') && size_val.contains('x') {
+                (pfx.trim().to_string(), size_val)
+            } else {
+                (args.to_string(), "1024x1024".to_string())
+            }
+        } else {
+            (args.to_string(), "1024x1024".to_string())
+        }
+    };
+
+    if prompt.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(
+            chat_id,
+            "사용법: /image <프롬프트> [--size 1024x1024]\n예: /image 파란 하늘의 강아지, 수채화",
+        ).await)?;
+        return Ok(());
+    }
+
+    // Placeholder so the user knows we're working. codex imagegen typically
+    // takes 20–90 s, occasionally longer on rejection retries.
+    shared_rate_limit_wait(state, chat_id).await;
+    let placeholder = match tg!("send_message", bot.send_message(
+        chat_id,
+        format!("🎨 이미지 생성 중... (약 30~90초 소요, 프롬프트: \"{}\")", truncate_str(&prompt, 120)),
+    ).await) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    let placeholder_id = placeholder.id;
+
+    // Generate to a per-invocation temp path so two /image calls in quick
+    // succession don't stomp each other.
+    let out_path = std::env::temp_dir().join(format!(
+        "cokacdir_imagegen_{}_{}.png",
+        chat_id.0,
+        std::process::id(),
+    ));
+
+    let prompt_owned = prompt.clone();
+    let size_owned = size.clone();
+    let out_path_owned = out_path.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::services::codex::generate_image_blocking(&prompt_owned, &size_owned, &out_path_owned)
+    }).await;
+
+    let outcome = match result {
+        Ok(inner) => inner,
+        Err(join_err) => Err(format!("worker panicked: {}", join_err)),
+    };
+
+    match outcome {
+        Ok(()) => {
+            // Send photo, then drop the placeholder.
+            let photo = teloxide::types::InputFile::file(&out_path);
+            let caption = format!("📐 {} · \"{}\"", size, truncate_str(&prompt, 200));
+            shared_rate_limit_wait(state, chat_id).await;
+            let send_res = tg!("send_photo", bot.send_photo(chat_id, photo).caption(caption).await);
+            let _ = std::fs::remove_file(&out_path);
+            if send_res.is_err() {
+                // Telegram rejected the photo (too large? bad encoding?). Fall
+                // back to a document upload so the user at least gets the file.
+                let photo2 = teloxide::types::InputFile::file(&out_path);
+                shared_rate_limit_wait(state, chat_id).await;
+                let _ = tg!("send_document", bot.send_document(chat_id, photo2).await);
+            }
+            shared_rate_limit_wait(state, chat_id).await;
+            let _ = tg!("delete_message", bot.delete_message(chat_id, placeholder_id).await);
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&out_path);
+            shared_rate_limit_wait(state, chat_id).await;
+            let msg = format!("⚠️ 이미지 생성 실패: {}", err);
+            let _ = tg!("edit_message", bot.edit_message_text(chat_id, placeholder_id, &msg).await);
+        }
+    }
     Ok(())
 }
 

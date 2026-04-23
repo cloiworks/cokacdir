@@ -1,0 +1,89 @@
+name: release
+
+# Triggered when the `release` branch advances (direct push or PR merge).
+# Reads the version from Cargo.toml, builds binaries for every supported
+# platform, and publishes them as assets on a GitHub Release tagged
+# `v<version>`. The `cokacctl update` flow reads those assets.
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Grab the version from Cargo.toml once so every downstream job can agree
+  # on the tag / release name. If a release for this version already exists,
+  # every matrix job will still succeed (assets are uploaded with overwrite).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get.outputs.version }}
+      tag: ${{ steps.get.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: get
+        run: |
+          v=$(awk -F '"' '/^version *=/ { print $2; exit }' Cargo.toml)
+          if [ -z "$v" ]; then
+            echo "::error::Could not read version from Cargo.toml"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"    >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,   artifact: cokacdir-linux-x86_64,       use_cross: false }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu,  artifact: cokacdir-linux-aarch64,      use_cross: true  }
+          - { os: macos-latest,  target: aarch64-apple-darwin,       artifact: cokacdir-macos-aarch64,      use_cross: false }
+          - { os: macos-latest,  target: x86_64-apple-darwin,        artifact: cokacdir-macos-x86_64,       use_cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    artifact: cokacdir-windows-x86_64.exe, use_cross: false }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (linux-aarch64)
+        if: matrix.use_cross
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross 
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }} 
+      - name: Build (cargo)
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }} 
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ matrix.artifact }}" == *.exe ]]; then
+            cp "target/${{ matrix.target }}/release/cokacdir.exe" "dist/${{ matrix.artifact }}"
+          else
+            cp "target/${{ matrix.target }}/release/cokacdir" "dist/${{ matrix.artifact }}"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
+          fail_on_unmatched_files: true
+          files: dist/${{ matrix.artifact }}
+          generate_release_notes: true
+          make_latest: "true"

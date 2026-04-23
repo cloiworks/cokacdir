@@ -1605,35 +1605,6 @@ fn codex_extra_instructions() -> String {
     extra
 }
 
-/// Check if a newer version is available by fetching Cargo.toml from GitHub.
-/// Returns a notice string if an update is available, None otherwise.
-async fn check_latest_version(current: &str) -> Option<String> {
-    let url = "https://raw.githubusercontent.com/kstost/cokacdir/refs/heads/main/Cargo.toml";
-    let resp = reqwest::Client::new()
-        .get(url)
-        .timeout(std::time::Duration::from_secs(5))
-        .send().await.ok()?;
-    let text = resp.text().await.ok()?;
-    let latest = text.lines()
-        .find(|l| l.starts_with("version"))?
-        .split('"').nth(1)?;
-    if version_is_newer(latest, current) {
-        Some(format!("🆕 v{} available — https://cokacdir.cokac.com/", latest))
-    } else {
-        None
-    }
-}
-
-/// Compare two semver-like version strings. Returns true if `a` is strictly greater than `b`.
-fn version_is_newer(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> Vec<u64> {
-        s.split('.').filter_map(|p| p.parse().ok()).collect()
-    };
-    let va = parse(a);
-    let vb = parse(b);
-    va > vb
-}
-
 /// State for /loop command: self-verification loop
 struct LoopState {
     /// The original user request
@@ -2403,29 +2374,20 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
             .filter_map(|k| k.parse::<i64>().ok())
             .collect();
         let version = env!("CARGO_PKG_VERSION");
-        let update_notice = check_latest_version(version).await;
         for cid in chat_ids {
             if matches!(data.settings.startup_greeting_mute.get(&cid.to_string()), Some(&true)) {
                 continue;
             }
             let chat_id = ChatId(cid);
-            let last_path = data.settings.last_sessions.get(&cid.to_string())
-                .map(|p| p.as_str())
-                .unwrap_or("(unknown)");
             let model = get_model(&data.settings, chat_id);
             let provider = detect_provider(model.as_deref());
-            let msg = if data.settings.greeting {
-                // Compact mode: single line with version and model
-                format!("🟢 cokacdir started (v{}, {})", version, provider)
-            } else {
-                // Full mode: marketing message with links
-                let mut m = format!("🟢 cokacdir started (v{}, {})\n📂 Resuming session at {}\n💬 Join @cokacvibe for tips, updates, and community support\n⭐ Star us on GitHub: https://github.com/kstost/cokacdir", version, provider, last_path);
-                if let Some(ref notice) = update_notice {
-                    m.push('\n');
-                    m.push_str(notice);
-                }
-                m
-            };
+            // Single-line startup greeting. The old "full" mode shipped the
+            // session path + marketing links + community callout on every
+            // restart; on a personal bot that landed in the chat as multi-line
+            // noise, so we always send just the top line regardless of the
+            // `greeting` flag. `/greeting mute` still suppresses it entirely
+            // per-chat.
+            let msg = format!("🟢 cokacdir started (v{}, {})", version, provider);
             let _ = tg!("send_message", bot.send_message(chat_id, msg).await);
         }
     }

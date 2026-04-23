@@ -449,6 +449,8 @@ struct BotSettings {
     use_chrome: HashMap<String, bool>,
     /// chat_id (string) → message to send when AI processing completes
     end_hook: HashMap<String, String>,
+    /// chat_id (string) → true if startup greeting should be skipped for this chat
+    startup_greeting_mute: HashMap<String, bool>,
 }
 
 impl Default for BotSettings {
@@ -470,6 +472,7 @@ impl Default for BotSettings {
             greeting: false,
             use_chrome: HashMap::new(),
             end_hook: HashMap::new(),
+            startup_greeting_mute: HashMap::new(),
         }
     }
 }
@@ -1984,7 +1987,14 @@ fn load_bot_settings(token: &str) -> BotSettings {
             .collect())
         .unwrap_or_default();
 
-    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, queue, username, display_name, greeting, use_chrome, end_hook }
+    let startup_greeting_mute: HashMap<String, bool> = entry.get("startup_greeting_mute")
+        .and_then(|v| v.as_object())
+        .map(|obj| obj.iter()
+            .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+            .collect())
+        .unwrap_or_default();
+
+    BotSettings { allowed_tools, last_sessions, owner_user_id, as_public_for_group_chat, models, debug, silent, direct, context, instructions, queue, username, display_name, greeting, use_chrome, end_hook, startup_greeting_mute }
 }
 
 /// Save bot settings to bot_settings.json
@@ -2028,6 +2038,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         "greeting": settings.greeting,
         "use_chrome": settings.use_chrome,
         "end_hook": settings.end_hook,
+        "startup_greeting_mute": settings.startup_greeting_mute,
     });
     if let Some(owner_id) = settings.owner_user_id {
         entry["owner_user_id"] = serde_json::json!(owner_id);
@@ -2335,6 +2346,9 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         let version = env!("CARGO_PKG_VERSION");
         let update_notice = check_latest_version(version).await;
         for cid in chat_ids {
+            if matches!(data.settings.startup_greeting_mute.get(&cid.to_string()), Some(&true)) {
+                continue;
+            }
             let chat_id = ChatId(cid);
             let last_path = data.settings.last_sessions.get(&cid.to_string())
                 .map(|p| p.as_str())
@@ -3050,8 +3064,8 @@ async fn handle_message(
         handle_model_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with("/greeting") {
         msg_debug("[handle_message] routing → /greeting");
-        println!("  [{timestamp}] ◀ [{user_name}] /greeting");
-        handle_greeting_command(&bot, chat_id, &state, token).await?;
+        println!("  [{timestamp}] ◀ [{user_name}] /greeting {}", text.strip_prefix("/greeting").unwrap_or("").trim());
+        handle_greeting_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with("/debug") {
         msg_debug("[handle_message] routing → /debug");
         println!("  [{timestamp}] ◀ [{user_name}] /debug");
@@ -5892,20 +5906,55 @@ async fn handle_setpollingtime_command(
 async fn handle_greeting_command(
     bot: &Bot,
     chat_id: ChatId,
+    text: &str,
     state: &SharedState,
     token: &str,
 ) -> ResponseResult<()> {
-    let next = {
-        let mut data = state.lock().await;
-        let next = !data.settings.greeting;
-        data.settings.greeting = next;
-        save_bot_settings(token, &data.settings);
-        next
+    let arg = text.strip_prefix("/greeting").unwrap_or("").trim().to_lowercase();
+    let reply = match arg.as_str() {
+        "mute" => {
+            let mut data = state.lock().await;
+            data.settings.startup_greeting_mute.insert(chat_id.0.to_string(), true);
+            save_bot_settings(token, &data.settings);
+            "🔕 이 채팅은 앞으로 startup greeting 메시지를 받지 않습니다.".to_string()
+        }
+        "unmute" => {
+            let mut data = state.lock().await;
+            data.settings.startup_greeting_mute.remove(&chat_id.0.to_string());
+            save_bot_settings(token, &data.settings);
+            "🔔 이 채팅은 다시 startup greeting 메시지를 받습니다.".to_string()
+        }
+        "status" => {
+            let data = state.lock().await;
+            let format = if data.settings.greeting { "compact" } else { "full" };
+            let muted = matches!(
+                data.settings.startup_greeting_mute.get(&chat_id.0.to_string()),
+                Some(&true)
+            );
+            let mute_state = if muted { "muted (이 채팅은 받지 않음)" } else { "active (이 채팅은 받음)" };
+            format!("🟢 Greeting — format: {format}, delivery: {mute_state}")
+        }
+        "" | "toggle" => {
+            let next = {
+                let mut data = state.lock().await;
+                let next = !data.settings.greeting;
+                data.settings.greeting = next;
+                save_bot_settings(token, &data.settings);
+                next
+            };
+            let status = if next { "compact" } else { "full" };
+            format!("🟢 Startup greeting format: {status}")
+        }
+        _ => {
+            "사용법:\n\
+             /greeting — compact/full 포맷 토글\n\
+             /greeting mute — 이 채팅에 startup greeting 보내지 않기\n\
+             /greeting unmute — 다시 받기\n\
+             /greeting status — 현재 설정 확인".to_string()
+        }
     };
-    let status = if next { "compact" } else { "full" };
     shared_rate_limit_wait(state, chat_id).await;
-    tg!("send_message", bot.send_message(chat_id, format!("🟢 Startup greeting: {status}"))
-        .await)?;
+    tg!("send_message", bot.send_message(chat_id, reply).await)?;
     Ok(())
 }
 

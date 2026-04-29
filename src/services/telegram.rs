@@ -3080,7 +3080,7 @@ async fn handle_message(
         msg_debug("[handle_message] routing → /greeting");
         println!("  [{timestamp}] ◀ [{user_name}] /greeting {}", text.strip_prefix("/greeting").unwrap_or("").trim());
         handle_greeting_command(&bot, chat_id, &text, &state, token).await?;
-    } else if text.starts_with("/image") {
+    } else if text == "/image" || text.starts_with("/image ") || text.starts_with("/image@") {
         msg_debug("[handle_message] routing → /image");
         println!("  [{timestamp}] ◀ [{user_name}] /image {}", text.strip_prefix("/image").unwrap_or("").trim());
         handle_image_command(&bot, chat_id, &text, &state).await?;

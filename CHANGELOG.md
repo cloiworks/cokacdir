@@ -1,5 +1,11 @@
 # Changelog — cokacdir
 
+## 0.8.3 — 2026-04-29
+
+- Fixed: `/imagegen` was being intercepted by the `/image` handler because the prefix match `text.starts_with("/image")` also matched `/imagegen`, `/imageabc`, etc. The handler now matches only `/image`, `/image ...`, or `/image@bot...`. With this fix, `/imagegen` falls through to the AI/skill routing path so the `imagegen` SKILL.md (case-number pre-flight, gpt-image-2 via Codex `$imagegen`) actually runs.
+
+---
+
 ## 0.8.2 — 2026-04-29
 
 - Register `/imagegen` in `setMyCommands` so it appears in the Telegram autocomplete menu. Targets the `imagegen` skill (Codex `$imagegen` / gpt-image-2, case-based prompt templates).

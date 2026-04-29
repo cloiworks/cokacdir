@@ -3221,7 +3221,7 @@ async fn handle_message(
         } else {
             handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
         } }
-    } else if text.starts_with('/') && is_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
+    } else if text.starts_with('/') && is_existing_workspace_id(text[1..].split_whitespace().next().unwrap_or("")) {
         let workspace_id = text[1..].split_whitespace().next().unwrap_or_default();
         msg_debug(&format!("[handle_message] routing → workspace_resume: {}", workspace_id));
         println!("  [{timestamp}] ◀ [{user_name}] /{workspace_id}");
@@ -3706,6 +3706,16 @@ fn build_history_preview(history: &[HistoryItem], budget: usize) -> String {
 /// Check if a string is a valid 8-character workspace ID (e.g. "B4E9451D" or "k3m9x2ab")
 fn is_workspace_id(s: &str) -> bool {
     s.len() == 8 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// True only when `s` looks like a workspace ID AND the workspace directory
+/// actually exists. Used by the slash-command router so that 8-char words
+/// that happen to collide with the format (e.g. `/imagegen`) are not
+/// misrouted to workspace_resume — they fall through to AI/skill handling.
+fn is_existing_workspace_id(s: &str) -> bool {
+    if !is_workspace_id(s) { return false; }
+    let Some(home) = dirs::home_dir() else { return false; };
+    home.join(".cokacdir").join("workspace").join(s).is_dir()
 }
 
 /// Check if a string is a valid UUID (8-4-4-4-12 hex format)

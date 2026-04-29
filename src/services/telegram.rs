@@ -2336,6 +2336,7 @@ pub async fn run_bot(token: &str, api_url: Option<&str>) {
         teloxide::types::BotCommand::new("setendhook", "Set message to send when processing completes"),
         teloxide::types::BotCommand::new("setendhook_clear", "Clear end hook message"),
         teloxide::types::BotCommand::new("image", "Generate an image: /image <prompt> [--size 1024x1024]"),
+        teloxide::types::BotCommand::new("imagegen", "Generate image via Codex (gpt-image-2, case-based prompts)"),
     ];
     if let Err(e) = tg!("set_my_commands", bot.set_my_commands(commands).await) {
         println!("  ⚠ Failed to set bot commands: {e}");
